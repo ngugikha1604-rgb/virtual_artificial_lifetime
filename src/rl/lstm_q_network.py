@@ -1,0 +1,95 @@
+"""
+lstm_q_network.py — observation builders + network factory for the Conv-LSTM Q-net.
+
+Two responsibilities live here, deliberately split:
+
+1. PURE OBSERVATION BUILDERS (NumPy only — framework-agnostic, used by every
+   driver: run_episode, world_tick, visualize, live_viewer):
+     - encode_observation(...)   -> obs vector (OBS_SIZE,) = [multi-hot flat + body]
+     - build_observation         alias of encode_observation
+     - zero_state()              -> (np HIDDEN, np HIDDEN) initial hidden/cell
+   These never touch torch; world_tick and friends keep passing NumPy and
+   never see a tensor (the NumPy boundary lives at the agent).
+
+2. NETWORK FACTORY (PyTorch):
+     - build_lstm_network()      -> ConvLSTMDQN() (one nn.Module). The returned
+       object owns conv + LSTM cell + output head so torch manages gradients
+       + Adam. Feed it obs *vectors* from build_observation; see TorchQAgent.
+
+The encoding is MULTI-HOT, not one-hot: terrain (wall/water/soil/grass, plus
+"unknown" for behind-agent cells) and entity (food_low/food_high/hazard) are
+two INDEPENDENT channel groups that can both be "on" for the same cell (e.g.
+food sitting on water sets both bits) — see World.get_local_view_layers()
+for where the two raw grids come from. This used to collapse to a single
+mutually-exclusive code per cell (entity hides the terrain under it); see
+progress.md for why that changed.
+The resulting sizes (INPUT_SIZE = CONV_OUT + 3, OBS_SIZE =
+NUM_CELL_CLASSES*VIEW_H*VIEW_W + 3) are documented in src/config.py; the view
+may be non-square.
+"""
+import sys
+from pathlib import Path
+import numpy as np
+
+BRAIN_DIR = Path(__file__).resolve().parent.parent / "brain"
+SRC_DIR   = Path(__file__).resolve().parent.parent
+for _dir in (BRAIN_DIR, SRC_DIR):
+    if str(_dir) not in sys.path:
+        sys.path.insert(0, str(_dir))
+
+from config import NUM_CELL_CLASSES, HIDDEN_SIZE
+
+
+# 1. Pure NumPy observation builders
+def _multi_hot_grid(terrain_grid, entity_grid):
+    """
+    terrain_grid, entity_grid (H, W) int arrays from
+    World.get_local_view_layers() -> multi-hot (NUM_CELL_CLASSES, H, W).
+
+    Each cell sets its terrain-code bit (always exactly one, since terrain
+    incl. "unknown" is mutually exclusive with itself) AND, independently,
+    its entity-code bit if entity_grid says one is present (-1 means none).
+    This is a TRUE multi-channel binary encoding, not one-hot: a cell can
+    have 2 bits set (terrain + entity) or just 1 (terrain alone, or
+    "unknown" alone for behind-agent cells, which never carries an entity).
+
+    The spatial size is taken from the grids' own shape (H and W need not be
+    equal), so it stays correct for any VISION_RANGE / VISION_WIDTH combo in
+    config without hard-coding the view dimensions here.
+    """
+    C = NUM_CELL_CLASSES
+    h, w = terrain_grid.shape
+    multi = np.zeros((C, h * w), dtype=np.float64)
+    terrain_flat = np.asarray(terrain_grid, dtype=int).reshape(-1)
+    entity_flat  = np.asarray(entity_grid, dtype=int).reshape(-1)
+    for n in range(h * w):
+        multi[terrain_flat[n], n] = 1.0
+        e = entity_flat[n]
+        if e >= 0:
+            multi[e, n] = 1.0
+    return multi.reshape(C, h, w)
+
+
+def encode_observation(terrain_grid, entity_grid, internal_state):
+    """(terrain_grid, entity_grid) + body [(3,)] -> obs vector (OBS_SIZE,) float32."""
+    multi = _multi_hot_grid(terrain_grid, entity_grid)
+    return np.concatenate([multi.reshape(-1),
+                           np.asarray(internal_state, dtype=np.float32)
+                           ]).astype(np.float32)
+
+
+build_observation = encode_observation   # backward-compatible alias
+
+
+def zero_state():
+    """Fresh hidden/cell state (np float32 zeros) — reset at the start of a
+    lifetime. TorchQAgent converts these to tensors at its network boundary."""
+    return (np.zeros(HIDDEN_SIZE, dtype=np.float32),
+            np.zeros(HIDDEN_SIZE, dtype=np.float32))
+
+
+# 2. PyTorch network factory
+def build_lstm_network():
+    """Return a fresh ConvLSTMDQN PyTorch module."""
+    from torch_q_net import ConvLSTMDQN
+    return ConvLSTMDQN()
