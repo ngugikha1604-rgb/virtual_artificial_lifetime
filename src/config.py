@@ -48,9 +48,12 @@ MAX_AGE         = 400     # ticks a lifetime may last at most
 # (World.terrain) rather than being modeled as entities because its lifecycle
 # is completely different (static vs. ephemeral) — see progress.md.
 #
-# Codes share ONE alphabet with entities in the local-view grid (World's
-# get_local_view() shows whichever is present in a cell — entity takes
-# priority, else terrain). See World's docstring for the authoritative table.
+# Codes share ONE alphabet with entities in the local-view grid. World has TWO
+# ways to read a cell: get_local_view() collapses to one representative code
+# per cell (entity wins over terrain — used for human-facing display only),
+# while get_local_view_layers() keeps terrain and entity as independent bits
+# that the network's multi-hot observation encoding can both set at once (see
+# NUM_CELL_CLASSES above and World's docstring for the authoritative table).
 #
 # grass/soil: both freely walkable, currently mechanically identical (a hook
 #   for later, e.g. biasing food spawns toward one) — SOIL_FRACTION is the
@@ -79,11 +82,66 @@ WALL_SEGMENT_LEN  = 3      # length of each wall segment (straight, random orien
 SOIL_FRACTION     = 0.30   # fraction of the default ground fill that's soil (rest grass)
 WATER_DURATION_MULTIPLIER = 2   # x ACTION_DURATION for a move landing on water
 
+# ── Food growth (replaces instant "teleport respawn" with an organic sim) ─────
+# food_low/food_high used to instantly reappear elsewhere the moment one was
+# eaten (World._respawn_entity, zone-balanced). Now they're removed for good
+# on eat ("respawns": False, same as food_starter) and NEW food only appears
+# through this per-tick growth simulation — chosen because instant magic
+# relocation never fit "world hợp lý hơn" (a more believable/organic world),
+# and because it's what finally makes soil vs grass mechanically different,
+# not just differently colored (see SOIL_FRACTION above, previously just a
+# hook for this).
+#
+# TWO-STAGE growth, not "roll dice -> food appears" in one step:
+#   1. SEEDING (stochastic): each tick, every eligible empty cell (grass or
+#      soil, no entity, not already seeded) has a small chance of becoming a
+#      seed (World.seeds: {(x,y): ticks_remaining}). Chance =
+#          FOOD_SEED_BASE_RATE[terrain]
+#        + FOOD_SEED_SPREAD_BONUS[terrain]  (only if an orthogonally-adjacent
+#                                             cell currently has a MATURE food
+#                                             item — "reproduction"/spreading
+#                                             from existing food, not other
+#                                             seeds)
+#      Soil seeds spontaneously FASTER (base rate) but spreads slower;
+#      grass is the opposite — spreads fast near existing food but rarely
+#      starts one on its own. (Khanh's choice — "soil mọc nền nhanh hơn, grass
+#      lan truyền nhanh hơn".)
+#   2. MATURATION (deterministic): once seeded, a fixed countdown (randomized
+#      per seed between MIN/MAX below) ticks down; at 0 the seed becomes an
+#      actual food entity. This is what makes growth genuinely feel like
+#      "planted, then takes time to grow" instead of an instant probability
+#      roll — a seed's arrival is stochastic, but once it exists, its
+#      maturity time is not, so growth is visibly staged over time rather
+#      than popping food into existence at random.
+# Seeds are NOT visible to the agent (no observation channel — kept out of
+# NUM_CELL_CLASSES on purpose, so this doesn't re-invalidate the network); a
+# human watching the GIF/live_viewer CAN see them (small distinct marker) —
+# this can change later if "agent waits near a maturing seed" behavior is
+# wanted, at the cost of another observation channel.
+#
+# Food TYPE on maturation is a fixed global split, independent of terrain or
+# the neighbor that triggered the spread (Khanh's choice — simplest option).
+FOOD_SEED_BASE_RATE   = {"soil": 0.003, "grass": 0.001}
+FOOD_SEED_SPREAD_BONUS = {"soil": 0.005, "grass": 0.012}
+FOOD_SEED_MATURATION_MIN = 15   # ticks a seed takes to become food (fastest)
+FOOD_SEED_MATURATION_MAX = 30   # ticks a seed takes to become food (slowest)
+FOOD_GROWTH_TYPE_SPLIT = {"food_low": 0.7, "food_high": 0.3}
+# Cap on (mature food + pending seeds) combined — growth simply stops
+# attempting NEW seeds once reached (existing seeds already "in progress"
+# still mature normally, so actual food count can briefly exceed this right
+# after several mature at once). Prevents the spreading/reproduction bonus
+# from compounding unbounded and carpeting the whole 10x10 world; think of it
+# as the world's food carrying capacity. (2026-09: lowered 20->14 + halved the
+# rates above — Khanh found the world felt too food-dense; still comfortably
+# above the initial NUM_FOOD_LOW+NUM_FOOD_HIGH+NUM_FOOD_STARTER=10 so there's
+# some room to regrow, just less of it.)
+MAX_FOOD_ON_WORLD = 14
+
 # Local-view geometry — the source of truth; World.__init__ defaults mirror it.
 # The agent sees VISION_RANGE squares straight ahead, VISION_WIDTH columns wide,
 # plus BEHIND_ROWS squares behind it. The observation grid World.get_local_view()
 # produces has shape (VIEW_H, VIEW_W) = (VISION_RANGE + BEHIND_ROWS, VISION_WIDTH).
-# These drive the network's input size (per-cell one-hot classes + conv), so
+# These drive the network's input size (per-cell multi-hot classes + conv), so
 # changing VISION_RANGE here re-sizes the Conv-LSTM and invalidates any saved
 # weights (model_io refuses the shape mismatch and falls back to a fresh net).
 VISION_RANGE   = 4        # how many cells ahead the agent can see (was 2)
@@ -96,14 +154,20 @@ VIEW_W         = VISION_WIDTH                 # observation grid columns (4)
 NUM_ACTIONS     = 5       # 0=stay,1=fwd,2=bwd,3=turnL,4=turnR
 HIDDEN_SIZE     = 64      # LSTM hidden size
 
-# One-hot channels: one binary channel per cell code 0..7 (unknown, wall,
+# Multi-hot channels: one binary channel per cell code 0..7 (unknown, wall,
 # water, soil, grass, food_low, food_high, hazard). food_starter (see
 # NUM_FOOD_STARTER) deliberately reuses food_low's code/channel rather than
 # getting its own — see World's docstring — so this does NOT need bumping to
-# 9 for it. Keeping the binary-per-content-class mapping rather than a single
-# scalar magnitude removes the implicit "better/worse" ordering a magnitude
-# encoding would impose on discrete object/terrain classes. The network
-# learns each channel's importance from data.
+# 9 for it. This is a TRUE multi-hot encoding, not one-hot: a cell's terrain
+# channel and its entity channel (if any) can BOTH be 1 at once (e.g. food
+# sitting on water) — see World.get_local_view_layers() and
+# lstm_q_network.encode_observation(). Binary-per-content-class channels
+# (rather than a single scalar magnitude) also remove the implicit
+# "better/worse" ordering a magnitude encoding would impose on discrete
+# object/terrain classes; the network learns each channel's importance and
+# any co-occurrence patterns from data. This scales cleanly as more
+# independent layers get added later (e.g. a scent/weather layer) — each is
+# just another channel that can overlap with the others, no re-encoding needed.
 NUM_CELL_CLASSES = 8      # len of World cell-code alphabet (0..7 incl. unknown)
 
 # Conv2D that maps the multi-channel local view down to spatial features.
@@ -118,10 +182,10 @@ CONV_OUT        = CONV_FILTERS * VIEW_H * VIEW_W
 # LSTM input = flattened conv output + 3 body-state (energy, health, age).
 INPUT_SIZE      = CONV_OUT + 3
 
-# The observation vector an episode stores in replay is the one-hot grid +
+# The observation vector an episode stores in replay is the multi-hot grid +
 # body state (conv weights live in the agent and run per forward, not on the
 # stored vector). Its length is what run_episode/live_viewer push as x.
-OBS_GRID_FLAT   = NUM_CELL_CLASSES * VIEW_H * VIEW_W   # one-hot, flattened
+OBS_GRID_FLAT   = NUM_CELL_CLASSES * VIEW_H * VIEW_W   # multi-hot, flattened
 OBS_SIZE        = OBS_GRID_FLAT + 3
 
 LEARNING_RATE   = 1e-3    # Adam + DQN: 0.01 is far too hot (Q-values oscillate
@@ -221,6 +285,23 @@ HAZARD_PENALTY      = 1.00
 STARVATION_PENALTY  = 1.00
 SHAPE_WEIGHT_FOOD   = 0.10
 SHAPE_WEIGHT_HAZARD = 0.10
+
+# Terminal (once-per-lifetime) reward, paid on the tick the episode ends,
+# regardless of cause — previously the ONLY signal tied to "how long did you
+# survive" was SURVIVAL_BONUS (0.001/tick) accumulating, which over a typical
+# ~150-400 tick lifetime totals only ~0.15-0.4 — negligible next to a single
+# FOOD_BONUS (3-5) or HAZARD_PENALTY (1). This makes surviving longer a much
+# more explicit, comparable-scale signal instead of an easily-drowned-out one.
+#   AGE_BONUS_PER_TICK: paid ONCE at episode end, proportional to the final
+#     age reached (not accumulated every tick like SURVIVAL_BONUS) — 0.05 so
+#     a lifetime of ~200 ticks earns ~10 (a couple of FOOD_BONUS-eats' worth),
+#     and a full ~400-tick run earns ~20.
+#   MAX_AGE_SURVIVAL_BONUS: an ADDITIONAL flat bonus, paid only if the episode
+#     ended by reaching MAX_AGE with health still > 0 (i.e. old age, not a
+#     hazard/starvation death) — a clear "completed a full life" signal,
+#     distinct from merely having racked up a lot of ticks before dying.
+AGE_BONUS_PER_TICK      = 0.05
+MAX_AGE_SURVIVAL_BONUS  = 10.0
 
 # ── Checkpointing (best-model tracking + periodic saves) ─────────────────────
 # Training used to save weights ONLY once, after the entire run finished:

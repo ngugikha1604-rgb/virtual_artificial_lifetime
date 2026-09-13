@@ -9,7 +9,10 @@ from config import (VISION_RANGE, VISION_WIDTH, BEHIND_ROWS,
                     WORLD_SIZE, NUM_FOOD_LOW, NUM_FOOD_HIGH, NUM_HAZARDS,
                     NUM_FOOD_STARTER,
                     NUM_WATER_PATCHES, WATER_PATCH_SIZE,
-                    NUM_WALL_SEGMENTS, WALL_SEGMENT_LEN, SOIL_FRACTION)
+                    NUM_WALL_SEGMENTS, WALL_SEGMENT_LEN, SOIL_FRACTION,
+                    FOOD_SEED_BASE_RATE, FOOD_SEED_SPREAD_BONUS,
+                    FOOD_SEED_MATURATION_MIN, FOOD_SEED_MATURATION_MAX,
+                    FOOD_GROWTH_TYPE_SPLIT, MAX_FOOD_ON_WORLD)
 
 
 class World:
@@ -72,9 +75,14 @@ class World:
     # entity type -> local-view code + reward/behavior category (+ optional
     # "respawns": False for a one-shot entity that's removed, not repositioned,
     # once eaten/triggered — defaults to True via ENTITY_SPECS[...].get(...)).
+    # food_low/food_high are respawns=False now too (like food_starter): new
+    # food no longer teleports in instantly on eat, it only comes from the
+    # per-tick growth simulation (_advance_food_growth) — see config.py's
+    # "Food growth" section for why. Hazard is the only entity that still
+    # instantly relocates (_respawn_entity), unaffected by this change.
     ENTITY_SPECS = {
-        "food_low":     {"code": 5, "category": "food"},
-        "food_high":    {"code": 6, "category": "food"},
+        "food_low":     {"code": 5, "category": "food", "respawns": False},
+        "food_high":    {"code": 6, "category": "food", "respawns": False},
         "hazard":       {"code": 7, "category": "hazard"},
         # code intentionally == food_low's (see class docstring) — NOT a new
         # one-hot channel, so NUM_CELL_CLASSES stays 8, not 9.
@@ -107,6 +115,7 @@ class World:
             "food_starter": num_food_starter,
         }
         self.entities = []  # list of {"type": str, "pos": (x, y)}
+        self.seeds = {}     # {(x, y): ticks_remaining} — pending food growth, see _advance_food_growth
         self._init_terrain()   # BEFORE entities: entity spawn avoids wall cells
         self._init_entities()
 
@@ -362,7 +371,10 @@ class World:
 
     def _respawn_entity(self, entity, avoid_position=None):
         """Respawn into the zone that currently has the fewest entities of
-        the same category — keeps food spread even after eating events."""
+        the same category. In practice only ever called for hazard now (all
+        food types are respawns=False, see ENTITY_SPECS) — kept generic
+        rather than hazard-only in case a future entity wants this exact
+        "instant relocation, zone-balanced" behavior again."""
         if self.ENTITY_SPECS[entity["type"]]["category"] == "food":
             zone_counts = self._zone_food_counts()
             # pick zone(s) with minimum food
@@ -373,6 +385,67 @@ class World:
                                                            avoid=avoid_position)
         else:
             entity["pos"] = self._random_free_cell(avoid=avoid_position)
+
+    def _advance_food_growth(self):
+        """One tick of the food growth simulation — see config.py's "Food
+        growth" section for the full design rationale. Called once per tick
+        from step(), regardless of what action happened that tick (growth is
+        a background world process, independent of the agent).
+
+        Two stages:
+          1. Mature any seeds whose countdown reached 0 into a real food
+             entity (type chosen via FOOD_GROWTH_TYPE_SPLIT).
+          2. If there's still room under MAX_FOOD_ON_WORLD, roll for NEW
+             seeds on eligible empty grass/soil cells — base rate always
+             applies; a spreading bonus additionally applies wherever an
+             orthogonally-adjacent cell currently holds a MATURE food item
+             (not another seed — only grown food "reproduces").
+        """
+        # ---- 1. mature existing seeds ----
+        matured = []
+        for pos in list(self.seeds.keys()):
+            self.seeds[pos] -= 1
+            if self.seeds[pos] <= 0:
+                matured.append(pos)
+        for pos in matured:
+            del self.seeds[pos]
+            food_type = ("food_low" if np.random.random() < FOOD_GROWTH_TYPE_SPLIT["food_low"]
+                        else "food_high")
+            self.entities.append({"type": food_type, "pos": pos})
+
+        # ---- 2. roll for new seeds (vectorized over the whole grid) ----
+        num_food = len(self.positions_by_category("food"))
+        if num_food + len(self.seeds) >= MAX_FOOD_ON_WORLD:
+            return   # at carrying capacity — no new seeds this tick
+
+        has_food = np.zeros((self.width, self.height), dtype=bool)
+        for pos in self.positions_by_category("food"):
+            has_food[pos[0], pos[1]] = True
+        # orthogonal-neighbor OR, with edges padded False (no wraparound)
+        neighbor_has_food = np.zeros_like(has_food)
+        neighbor_has_food[1:,  :] |= has_food[:-1, :]   # neighbor to the west
+        neighbor_has_food[:-1, :] |= has_food[1:,  :]   # neighbor to the east
+        neighbor_has_food[:, 1:]  |= has_food[:, :-1]   # neighbor to the south
+        neighbor_has_food[:, :-1] |= has_food[:, 1:]    # neighbor to the north
+
+        prob = np.zeros((self.width, self.height), dtype=float)
+        for terrain_code, terrain_name in ((self.CELL_SOIL, "soil"), (self.CELL_GRASS, "grass")):
+            mask = self.terrain == terrain_code
+            prob[mask] = FOOD_SEED_BASE_RATE[terrain_name]
+            spread_mask = mask & neighbor_has_food
+            prob[spread_mask] += FOOD_SEED_SPREAD_BONUS[terrain_name]
+
+        # ineligible: already an entity there, or already seeded
+        for e in self.entities:
+            prob[e["pos"][0], e["pos"][1]] = 0.0
+        for pos in self.seeds:
+            prob[pos[0], pos[1]] = 0.0
+
+        roll = np.random.random((self.width, self.height))
+        new_seed_cells = np.argwhere(roll < prob)
+        for x, y in new_seed_cells:
+            ticks = np.random.randint(FOOD_SEED_MATURATION_MIN, FOOD_SEED_MATURATION_MAX + 1)
+            self.seeds[(int(x), int(y))] = int(ticks)
 
     def entity_at(self, pos):
         for e in self.entities:
@@ -534,4 +607,5 @@ class World:
                     self.entities.remove(entity)
 
         self.time += 1
+        self._advance_food_growth()
         return new_pos, new_facing, event, entered_water

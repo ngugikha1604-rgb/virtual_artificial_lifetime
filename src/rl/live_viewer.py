@@ -38,6 +38,7 @@ COLOR_AGENT     = (41, 128, 185)
 COLOR_FOOD_LOW  = (230, 126, 34)   # orange
 COLOR_FOOD_HIGH = (241, 196, 15)   # gold
 COLOR_FOOD_STARTER = (26, 188, 156)  # teal — visually distinct one-shot food
+COLOR_SEED      = (154, 205, 50)   # yellowgreen — small dot for a growing seed
 COLOR_HAZARD    = (192, 57, 43)    # dark red
 COLOR_WALL      = (90, 95, 105)    # gray
 COLOR_WATER     = (93, 173, 226)   # blue
@@ -150,8 +151,8 @@ class WorldViewer2D:
         self.agent = Agent(self.world, max_age=self.max_age)
         self.replay.start_episode()   # Phase B: begin a fresh episode buffer
         self.h, self.c = zero_state()
-        grid = self.world.get_local_view(self.agent.position, self.agent.facing)
-        self.state = build_observation(grid, self.agent.internal_state)
+        terrain_grid, entity_grid = self.world.get_local_view_layers(self.agent.position, self.agent.facing)
+        self.state = build_observation(terrain_grid, entity_grid, self.agent.internal_state)
 
         self.last_action    = None
         self.last_q_values  = np.zeros(NUM_ACTIONS)
@@ -184,7 +185,9 @@ class WorldViewer2D:
                 self.total_hazard_hits += 1
 
         reward = compute_reward(result.event, prev_pos, result.prev_facing,
-                                self.agent.position, self.world, starved=result.starved)
+                                self.agent.position, self.world, starved=result.starved,
+                                done=result.done, age=self.agent.age,
+                                survived_full_life=(result.done and self.agent.health > 0))
         self.last_reward = reward
         self.last_event  = result.event
 
@@ -258,6 +261,12 @@ class WorldViewer2D:
                     self.screen.blit(s, (scr_x, scr_y))
                     pygame.draw.rect(self.screen, (52, 152, 219, 100), (scr_x, scr_y, cell_size, cell_size), 1)
 
+        # Seeds (growing food, not yet visible to the agent — human-only marker)
+        for (sx, sy) in self.world.seeds:
+            scr_x = offset_x + sx * cell_size + cell_size // 2
+            scr_y = offset_y + (self.world_size - 1 - sy) * cell_size + cell_size // 2
+            pygame.draw.circle(self.screen, COLOR_SEED, (scr_x, scr_y), max(3, cell_size // 6))
+
         # Entities: food_low (small orange dot), food_high (bigger gold dot), hazard (red X)
         for entity in self.world.entities:
             ex, ey = entity["pos"]
@@ -299,7 +308,7 @@ class WorldViewer2D:
         # Legend
         legend_y = offset_y + grid_pixel_size + 8
         items = [("Food (low)", COLOR_FOOD_LOW), ("Food (high)", COLOR_FOOD_HIGH),
-                ("Food (starter)", COLOR_FOOD_STARTER),
+                ("Food (starter)", COLOR_FOOD_STARTER), ("Seed", COLOR_SEED),
                 ("Hazard", COLOR_HAZARD), ("Wall", COLOR_WALL), ("Water", COLOR_WATER)]
         lx = offset_x
         for label, color in items:

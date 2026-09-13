@@ -1,5 +1,5 @@
 {
-  "epsilon": 0.923097878088044,
-  "lifetimes_trained": 160,
-  "best_metric": -35.488777777777784
+  "epsilon": 0.6504391454381077,
+  "lifetimes_trained": 860,
+  "best_metric": 23.417753333333327
 }

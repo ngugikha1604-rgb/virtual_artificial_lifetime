@@ -41,6 +41,7 @@ def snapshot(world, agent, step, event):
         "food_high_positions":    list(world.positions_by_type("food_high")),
         "food_starter_positions": list(world.positions_by_type("food_starter")),
         "hazard_positions":       list(world.positions_by_type("hazard")),
+        "seed_positions":         list(world.seeds.keys()),
         "energy": agent.energy, "health": agent.health, "event": event,
         "busy": not agent.is_free,
     }
@@ -67,6 +68,8 @@ def save_lifetime_gif(frames, width, height, output_path, fps=5, terrain=None):
         ax_world.imshow(img, extent=(-0.5, width-0.5, -0.5, height-0.5),
                         origin="lower", zorder=0)
     agent_dot,=ax_world.plot([],[],marker="^",color="royalblue",markersize=18,label="Agent")
+    seed_dots,=ax_world.plot([],[],marker=".",color="yellowgreen",markersize=8,
+                              linestyle="None",label="Seed (growing)")
     food_low_dots,=ax_world.plot([],[],marker="*",color="orange",markersize=14,
                                   linestyle="None",label="Food (low)")
     food_high_dots,=ax_world.plot([],[],marker="*",color="gold",markersize=22,
@@ -99,6 +102,8 @@ def save_lifetime_gif(frames, width, height, output_path, fps=5, terrain=None):
 
         food_low_dots.set_data([p[0] for p in fr["food_low_positions"]],
                                 [p[1] for p in fr["food_low_positions"]])
+        seed_dots.set_data([p[0] for p in fr["seed_positions"]],
+                            [p[1] for p in fr["seed_positions"]])
         food_high_dots.set_data([p[0] for p in fr["food_high_positions"]],
                                  [p[1] for p in fr["food_high_positions"]])
         food_starter_dots.set_data([p[0] for p in fr["food_starter_positions"]],
@@ -112,7 +117,7 @@ def save_lifetime_gif(frames, width, height, output_path, fps=5, terrain=None):
         e_bar.set_height(e); e_bar.set_color("mediumseagreen" if e>30 else "tomato")
         h_bar.set_height(hp); h_bar.set_color("steelblue" if hp>50 else "darkorange")
         e_txt.set_text(f"{e:.0f}"); h_txt.set_text(f"{hp:.0f}")
-        return (agent_dot, food_low_dots, food_high_dots, food_starter_dots, hazard_dots,
+        return (agent_dot, seed_dots, food_low_dots, food_high_dots, food_starter_dots, hazard_dots,
                 step_text, e_bar, h_bar, e_txt, h_txt)
 
     anim=FuncAnimation(fig,update,frames=len(frames),interval=1000/fps,blit=False)

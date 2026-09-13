@@ -18,6 +18,7 @@ from world_tick import world_tick
 from config import (WORLD_SIZE, NUM_FOOD_LOW, NUM_FOOD_HIGH, NUM_HAZARDS, MAX_AGE,
                     SURVIVAL_BONUS, FOOD_BONUS, HAZARD_PENALTY, STARVATION_PENALTY,
                     SHAPE_WEIGHT_FOOD, SHAPE_WEIGHT_HAZARD,
+                    AGE_BONUS_PER_TICK, MAX_AGE_SURVIVAL_BONUS,
                     BATCH_SIZE, WINDOW_N, MIN_EPISODES, LEARN_EVERY)
 
 
@@ -33,13 +34,15 @@ def _nearest_dist_delta(prev_pos, new_pos, positions):
     return prev_d, new_d
 
 
-def compute_reward(event, prev_pos, prev_facing, new_pos, world, starved=False):
+def compute_reward(event, prev_pos, prev_facing, new_pos, world, starved=False,
+                    done=False, age=0, survived_full_life=False):
     """
     reward = survival bonus
            + food bonus (on eat) OR food-attraction shaping
            + hazard-avoidance shaping (always active)
            - flat hazard penalty (every tick standing on a hazard cell)
            - flat starvation penalty (every tick starvation damage is applied)
+           + [only on the tick the episode ends] age bonus + completion bonus
 
     Both shapings are potential-based (Ng et al. 1999) — additive-safe under
     full observability. This world is a POMDP (the agent only ever sees its
@@ -57,6 +60,14 @@ def compute_reward(event, prev_pos, prev_facing, new_pos, world, starved=False):
     only signal was indirect (dying sooner costs future SURVIVAL_BONUS/food).
     `starved` (world_tick.TickResult.starved) makes starvation legible the
     same explicit way hazard already was.
+
+    `done`/`age`/`survived_full_life` add a once-per-lifetime terminal reward
+    (see config.py's AGE_BONUS_PER_TICK/MAX_AGE_SURVIVAL_BONUS comment) so
+    "how long did you survive" is a much more explicit, comparable-scale
+    signal than SURVIVAL_BONUS accumulating alone ever was — age bonus is
+    paid regardless of cause of death, the completion bonus only if the
+    episode ended by reaching MAX_AGE with health still > 0 (old age, not a
+    hazard/starvation death).
     """
     reward   = SURVIVAL_BONUS
     max_dist = world.width + world.height - 2
@@ -81,6 +92,11 @@ def compute_reward(event, prev_pos, prev_facing, new_pos, world, starved=False):
 
     if starved:
         reward -= STARVATION_PENALTY
+
+    if done:
+        reward += AGE_BONUS_PER_TICK * age
+        if survived_full_life:
+            reward += MAX_AGE_SURVIVAL_BONUS
 
     return reward
 
@@ -138,7 +154,9 @@ def run_episode(world, agent, brain, replay, train=True, render=False, record=Fa
                 hazard_hits += 1
 
         reward = compute_reward(result.event, result.prev_pos, result.prev_facing,
-                                agent.position, world, starved=result.starved)
+                                agent.position, world, starved=result.starved,
+                                done=result.done, age=agent.age,
+                                survived_full_life=(result.done and agent.health > 0))
         # Phase B: store the tick in the current EPISODE with its pre-tick
         # hidden (h,c) as the anchor so a later window can unroll from it.
         replay.push(x, h, c, result.action, reward, result.done)

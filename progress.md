@@ -691,3 +691,145 @@ giờ vẫn có thể bị ghi đè bởi checkpoint định kỳ (`SAVE_EVERY`)
  thực sự hiển code 5 ở ô trước mặt spawn → full `run_experiment.py --lifetimes 15` chạy
  sạch → `live_viewer.py` headless không lỗi → test checkpoint giả 9-class bị từ chối đúng
  cách (không crash, fallback brain mới).
+
+---
+
+## Đổi sang MULTI-HOT thật (không còn mutually-exclusive) cho observation (2026-09)
+
+**Mục đích**: Khanh muốn encode kiểu binary multi-channel thật sự — nhiều layer có thể cùng
+ bật cho 1 ô (VD ô vừa là water vừa có food_low → cả 2 bit đều bật), thay vì 1 ô chỉ được
+ 1 mã duy nhất như trước (entity đè lên terrain, che mất thông tin terrain bên dưới). Lý do
+ Khanh nêu: sau này sẽ còn nhiều thứ chồng lên nhau hơn nữa, nên cần chuyển sang kiểu này
+ để agent học tốt hơn (và để kiến trúc scale được khi thêm layer mới sau này, không phải
+ thiết kế lại encoding mỗi lần).
+
+**Kết quả mong đợi**: network nhận đủ thông tin về một ô (cả terrain LẪN entity nếu có),
+ thay vì chỉ thấy được 1 trong 2 — về lý thuyết giúp phân biệt được ô “food đặt trên
+ water” (tốn thêm thời gian/năng lượng để đến) với “food đặt trên grass” (đến bình
+ thường) — trước đây 2 trường hợp này nhìn HOÀN TOÀN GIỐNG NHAU qua quan sát (chỉ thấy
+ code food, không thấy được terrain bị food che), nên agent không thể học được sự khác
+ biệt đó dù thực tế chi phí khác nhau.
+
+**Đã sửa**:
+- Thêm `World.get_local_view_layers(position, facing)` — trả về 2 grid RIÊNG BIỆT
+  (`terrain_grid`, `entity_grid`, entity dùng sentinel `-1` = không có) thay vì 1 grid đã
+  bị collapse ưu tiên entity như `get_local_view()` cũ. **`get_local_view()` cũ vẫn giữ
+  nguyên** — dùng riêng cho hiển thị (mini panel "AGENT LOCAL VISION" trong `live_viewer.py`),
+  không ảnh hưởng gì đến nhận thức của network.
+- `lstm_q_network.py`: `_class_vector(grid)` → `_multi_hot_grid(terrain_grid, entity_grid)`.
+  Mỗi ô: bit terrain LUÔN bật (đúng 1 trong wall/water/soil/grass/unknown — những cái này
+  vẫn loại trừ lẫn nhau), VÀ độc lập, bit entity bật thêm nếu có (`entity_grid != -1`).
+  Ví dụ đúng như Khanh nêu: `water + food_low` → `[0,0,1,0,0,1,0,0]` (đã verify trực tiếp,
+  bit‐khớp từng phiên bản).
+- `encode_observation()` đổi chữ ký: `encode_observation(terrain_grid, entity_grid,
+  internal_state)` thay vì `encode_observation(grid, internal_state)`. Cập nhật 3 nơi gọi:
+  `world_tick.py` (x_next), `run_episode.py` (x đầu lifetime), `live_viewer.py`
+  (`_reset_episode`).
+
+**Điểm quan trọng: KHÔNG invalidate brain hiện có** — `NUM_CELL_CLASSES` vẫn là 8, kích
+ thước vector vẫn 195 y hệt trước, nên `model_io`'s shape-check sẽ KHÔNG phát hiện gì cả (tải
+ bình thường, không lỗi). **Nhưng ngữ nghĩa input đã đổi thật** — một brain đã train với
+ encoding cũ (mutually-exclusive) sẽ nhận input theo phân phối khác hẳn (nhiều pattern 2-bit
+ nó chưa từng thấy trong lúc train) — **nên vẫn khuyến nghị train lại từ đầu** dù kỹ thuật
+ không bắt buộc (không crash) như các lần đổi `NUM_CELL_CLASSES` trước đây.
+
+**Đã verify bằng chạy thật**: unit test trực tiếp `_multi_hot_grid` với 4 trường hợp
+ (grass đơn, water+food_low, unknown, wall đơn) — khớp chính xác từng bit kỳ vọng → full
+ `run_experiment.py --lifetimes 15` chạy sạch → `live_viewer.py` headless 200 tick với
+ training bật, không lỗi.
+
+---
+
+## Food gieo hạt + mọc theo thời gian, thay cho "dịch chuyển tức thời" (2026-09)
+
+**Mục đích**: Khanh muốn bỏ cơ chế "ăn xong dịch chuyển food tức thời sang ô khác" (cảm giác
+ "phép thuật", không hợp lý) — thay bằng food thật sự **mọc theo thời gian**, mỗi ô có tỷ lệ
+ riêng, và phải **gieo hạt trước** rồi mới có food (không phải roll xong ra food ngay). Đây
+ cũng chính là điểm khiến soil/grass **khác nhau về cơ chế thật** (không chỉ khác màu như
+ trước), đúng hướng đã để ngỏ từ lúc thêm terrain.
+
+**Kết quả mong đợi**: world cảm giác "sống" hơn — food không phải vector cố định luôn
+ có sẵn ở đâu đó, mà xuất hiện/biến mất theo một nhịp điệu tự nhiên; xem GIF/live_viewer
+ sẽ thấy được "mầm" (chấm xanh nhạt nhỏ) trước khi nó thành food thật — trực quan hóa
+ đúng quá trình sinh trưởng thay vì food "nổ ra" đột ngột.
+
+**Chốt thiết kế (theo trả lời của Khanh)**:
+- Loại food mới mọc: tỷ lệ cố định 70% food_low / 30% food_high, không phụ thuộc terrain
+  hay loại food hàng xóm.
+- 2 giai đoạn: **gieo hạt** (xác suất mỗi tick) → **chín** (đếm ngược thời gian cố định,
+  không phải xác suất) — gần giống logic trồng cây thật: gieo là may rủi, nhưng đã gieo
+  thì chắc chắn lớn sau 1 khoảng thời gian cố định (ngẫu nhiên trong khoảng 15-30 tick).
+- Soil mọc NỂN nhanh hơn (tự nhiên, không cần food hàng xóm), grass LAN TRUYỀN nhanh hơn
+  (bùng khi có food kề bên) — đúng ngược với đề xuất ban đầu của Claude, theo ý Khanh chọn.
+- Hạt giống **không hiển thị cho agent** (không thêm observation channel) — chỉ là quá
+  trình nền của world, agent chỉ "biết" khi nó đã thành food thật. Có thể nâng cấp sau
+  nếu muốn agent học hành vi "chờ gần hạt sắp chín" (đổi lại phải thêm channel).
+
+**Đã sửa**:
+- `ENTITY_SPECS["food_low"/"food_high"]` thêm `"respawns": False` (giống `food_starter`) —
+  **không còn dịch chuyển tức thời nữa**, ăn xong biến mất hẳn, food mới chỉ đến qua growth.
+  `_respawn_entity`'s nhánh food zone-balance giờ thành dead code trong thực tế (chỉ còn
+  hazard dùng) — để nguyên, giữ tổng quát cho tương lai, chỉ cập nhật comment.
+- `World.seeds`: dict mới `{(x,y): ticks_remaining}`, không phải entity (không có code/category).
+- `World._advance_food_growth()`: gọi 1 lần cuối mỗi `World.step()`, bất kể action gì (background
+  process). Bước 1: đếm ngược + chín hạt đủ giờ, roll loại 70/30. Bước 2: nếu chưa chạm
+  `MAX_FOOD_ON_WORLD=20`, tính xác suất gieo hạt **vector hoá bằng numpy cho cả grid mỗi tick**
+  (không loop Python từng ô) — base rate theo terrain + bonus nếu ô kề (4 hướng) có food
+  TRƯỞNG THÀNH (không tính hạt khác — chỉ food thật mới "lan truyền" được).
+- Config mới: `FOOD_SEED_BASE_RATE`, `FOOD_SEED_SPREAD_BONUS` (dict `{"soil":, "grass":}`),
+  `FOOD_SEED_MATURATION_MIN/MAX` (15/30), `FOOD_GROWTH_TYPE_SPLIT` (0.7/0.3), `MAX_FOOD_ON_WORLD=20`
+  (trần "carrying capacity" — chỉ chặn GIEO HẠT MỚI, hạt đang chờ sẵn vẫn chín bình thường
+  nên tổng food có thể nhính nhẹ trên mức trần ngay sau khi vài hạt chín cùng lúc).
+- `visualize.py` + `live_viewer.py`: thêm marker riêng cho seed (chấm xanh vàng nhạt, nhỏ) —
+  chỉ để người xem thấy, không ảnh hưởng agent.
+
+**Đã verify bằng chạy thật**: xác nhận 2 giai đoạn đúng thứ tự (hạt trước, food sau, có
+ độ trễ) → test thống kê tỷ lệ loại food (87 mẫu ra 81.6% thấy lệch, verify lại với
+ 100k mẫu ra đúng 70.05% — xác nhận không phải bug, chỉ nhiễu thống kê mẫu nhỏ) → test
+ cap chặn gieo hạt mới đúng → chạy 2000 tick liên tục qua nhiều lifetime, food dao động
+ ổn định quanh mức trần (18-21), KHÔNG tăng vô hạn → full `run_experiment.py --lifetimes 15`
+ chạy sạch → xuất frame GIF thực tế thấy rõ chấm hạt giống đang chờ chín (tick 30) trước
+ khi thành food.
+
+**Không invalidate brain** — không đụng đến `NUM_CELL_CLASSES`/kích thước observation, chỉ
+ đổi logic world-side. Nếu Khanh đã có brain từ bước multi-hot trước thì vẫn dùng được —
+ nhưng hành vi "ăn xong food không dịch chuyển tức thời nữa" là thay đổi rất lớn về động
+ lực world, nên kết quả học được của brain cũ (nếu có) có thể không còn phản ánh đúng.
+
+---
+
+## Giảm food + thêm reward theo age (2026-09)
+
+**(1) Giảm food — Mục đích**: Khanh thấy world sau khi thêm growth cảm giác nhiều food quá.
+**Sửa tối thiểu** (đúng yêu cầu "đừng thay đổi nhiều"): chỉ hạ 3 con số trong `config.py`,
+ không động gì khác — `FOOD_SEED_BASE_RATE`/`FOOD_SEED_SPREAD_BONUS` giảm khoảng một nửa,
+ `MAX_FOOD_ON_WORLD` 20→14. **Kết quả mong đợi**: food dao động thấp hơn hẳn. **Đã verify**:
+ chạy 1800 tick liên tục, food giờ ổn định quanh 13-15 (trước đó ~18-21).
+
+**(2) Reward theo age — trả lời câu hỏi của Khanh trước khi sửa**: đúng là trước đó **chết
+ không có reward/penalty riêng nào** — tick chết tính giống hệt tick thường. Tín hiệu duy
+ nhất liên quan đến "sống lâu" là `SURVIVAL_BONUS=0.001` cộng dồn mỗi tick — cả đời
+ (150-400 tick) chỉ cộng dồn được ~0.15-0.4, không đáng kể so với 1 lần ăn food (3-5).
+
+**Đã sửa (theo 2 câu trả lời của Khanh: thưởng 1 cục lúc chết, tỷ lệ thuận với age; và
+ sống đủ hết `max_age` thì được thưởng thêm)**:
+- `AGE_BONUS_PER_TICK=0.05`: cộng **1 lần duy nhất** lúc kết thúc (`done=True`), bằng
+  `0.05 * age` — không phải cộng dồn mỗi tick như `SURVIVAL_BONUS`. Sống ~200 tick → +10
+  (~2 lần ăn food), sống hết 400 tick → +20. Áp dụng **bất kể lý do chết** (hazard, đói,
+  hay hết tuổi thọ).
+- `MAX_AGE_SURVIVAL_BONUS=10.0`: cộng THÊM (ngoài age bonus) **chỉ khi** kết thúc vì sống
+  đủ hết `max_age` VÀ health lúc đó vẫn > 0 (phân biệt với "chết do hết máu đúng lúc tuổi
+  thọ hết", trường hợp đó vẫn tính là chết, không được thưởng thêm).
+- `compute_reward()` thêm 3 tham số `done`, `age`, `survived_full_life` — cập nhật cả 2 nơi
+  gọi (`run_episode.py`, `live_viewer.py`), truyền `survived_full_life=(result.done and
+  agent.health > 0)`.
+
+**Đã verify bằng chạy thật**: test trực tiếp `compute_reward` với 4 tình huống (tick thường,
+ chết sớm vì hazard, chết sớm vì đói, sống hết `max_age`) — khớp đúng từng con số kỳ
+ vọng; xác nhận sống hết đời (reward=30) rõ ràng tốt hơn chết sớm (reward=1.5) → full
+ `run_experiment.py --lifetimes 15` chạy sạch → `live_viewer.py` headless không lỗi.
+
+**Lưu ý**: thay đổi này **không invalidate brain** (không đụng NUM_CELL_CLASSES/observation),
+ nhưng làm thang đo tổng `total_reward` tăng đáng kể (mỗi lifetime cộng thêm hàng chục
+ điểm từ age bonus) — đừng so trực tiếp `total_reward` trước/sau thay đổi này, không phản
+ ánh đúng "agent giỏi hơn hay tệ hơn", chỉ là đổi thang đo.
