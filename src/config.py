@@ -137,6 +137,19 @@ FOOD_GROWTH_TYPE_SPLIT = {"food_low": 0.7, "food_high": 0.3}
 # some room to regrow, just less of it.)
 MAX_FOOD_ON_WORLD = 14
 
+# ── Food aging / expiration ────────────────────────────────────────────────────
+# Once a seed matures into food_low, it ages through a fixed lifecycle:
+#   food_low  -> food_high  (after FOOD_AGE_STAGE_TICKS ticks)
+#   food_high -> food_low   (after FOOD_AGE_STAGE_TICKS ticks)
+#   food_low  -> rotten     (after FOOD_AGE_STAGE_TICKS ticks)
+#   rotten    -> gone       (after FOOD_AGE_STAGE_TICKS ticks, removed from world)
+# food_starter is EXEMPT — it exists until eaten (its whole purpose is a
+# guaranteed early win; making it rot would undermine that).
+# rotten_food is a distinct entity type with its own observation channel (8)
+# so the network can learn "that triangle is food I should avoid".
+# Eating rotten_food applies a negative energy effect (see FOOD_EFFECTS above).
+FOOD_AGE_STAGE_TICKS = 5    # ticks each stage lasts before advancing
+
 # Local-view geometry — the source of truth; World.__init__ defaults mirror it.
 # The agent sees VISION_RANGE squares straight ahead, VISION_WIDTH columns wide,
 # plus BEHIND_ROWS squares behind it. The observation grid World.get_local_view()
@@ -154,21 +167,17 @@ VIEW_W         = VISION_WIDTH                 # observation grid columns (4)
 NUM_ACTIONS     = 5       # 0=stay,1=fwd,2=bwd,3=turnL,4=turnR
 HIDDEN_SIZE     = 64      # LSTM hidden size
 
-# Multi-hot channels: one binary channel per cell code 0..7 (unknown, wall,
-# water, soil, grass, food_low, food_high, hazard). food_starter (see
-# NUM_FOOD_STARTER) deliberately reuses food_low's code/channel rather than
-# getting its own — see World's docstring — so this does NOT need bumping to
-# 9 for it. This is a TRUE multi-hot encoding, not one-hot: a cell's terrain
-# channel and its entity channel (if any) can BOTH be 1 at once (e.g. food
-# sitting on water) — see World.get_local_view_layers() and
-# lstm_q_network.encode_observation(). Binary-per-content-class channels
-# (rather than a single scalar magnitude) also remove the implicit
-# "better/worse" ordering a magnitude encoding would impose on discrete
-# object/terrain classes; the network learns each channel's importance and
-# any co-occurrence patterns from data. This scales cleanly as more
-# independent layers get added later (e.g. a scent/weather layer) — each is
-# just another channel that can overlap with the others, no re-encoding needed.
-NUM_CELL_CLASSES = 8      # len of World cell-code alphabet (0..7 incl. unknown)
+# Multi-hot channels: one binary channel per cell code 0..8:
+#   0=unknown, 1=wall, 2=water, 3=soil, 4=grass,
+#   5=food_low, 6=food_high, 7=hazard, 8=rotten_food.
+# food_starter reuses food_low's code 5 (see World docstring).
+# rotten_food gets its OWN channel (8) so the network can distinguish
+# "food that will hurt me" from "food that will help me" — this is the
+# whole point of adding it as a separate observable type.
+# NOTE: bumping this from 8 to 9 changes OBS_GRID_FLAT / OBS_SIZE /
+# INPUT_SIZE / CONV_OUT — all saved weights (best_model.pt) are now
+# incompatible and must be retrained from scratch.
+NUM_CELL_CLASSES = 9      # len of World cell-code alphabet (0..8 incl. unknown + rotten)
 
 # Conv2D that maps the multi-channel local view down to spatial features.
 # Same-pad convolution preserves the input spatial size, so the feature map is
@@ -246,6 +255,9 @@ FOOD_EFFECTS      = {
     # Same nutrition as food_low — its whole purpose is WHEN/WHERE it appears
     # (guaranteed at birth), not being extra nutritious. See NUM_FOOD_STARTER.
     "food_starter": {"energy": 30.0, "health": 10.0},
+    # Rotten food: eating it costs energy (about 1/3 of food_low's gain).
+    # No health change — it's mildly unpleasant, not lethal.
+    "rotten_food":  {"energy": -10.0, "health": 0.0},
 }
 # ticks each action occupies the agent before it can pick a new one; turning /
 # staying are instantaneous (duration 1). See Agent.ACTION_DURATION.
@@ -271,7 +283,8 @@ ACTION_DURATION   = {0: 1, 1: 3, 2: 3, 3: 1, 4: 1}
 #  - FOOD_BONUS / HAZARD_PENALTY unchanged: these are event-level (eat 3/5,
 #    hazard -1) and dominate whenever an interaction happens, as intended.
 SURVIVAL_BONUS      = 0.001
-FOOD_BONUS          = {"food_low": 3.00, "food_high": 5.00, "food_starter": 3.00}
+FOOD_BONUS          = {"food_low": 3.00, "food_high": 5.00, "food_starter": 3.00,
+                       "rotten_food": -1.50}   # eating rotten hurts
 HAZARD_PENALTY      = 1.00
 # Starvation (energy hits 0 -> STARVATION_DAMAGE to health every tick, see
 # Agent.apply_energy_cost) used to have NO direct reward penalty, unlike
@@ -303,6 +316,50 @@ SHAPE_WEIGHT_HAZARD = 0.10
 AGE_BONUS_PER_TICK      = 0.05
 MAX_AGE_SURVIVAL_BONUS  = 10.0
 
+# ── Reproduction / ecosystem (2026-09) ───────────────────────────────
+# Hybrid nature+nurture (Khanh's choice over pure forward-only evolution):
+# individuals keep learning via backprop during their life exactly as before
+# (TorchQAgent.learn_windows, completely unchanged), AND ALSO pass down
+# (mutated) weights to offspring — both mechanisms run side by side, not one
+# replacing the other.
+#
+# Trigger is fully automatic (no new "reproduce" action / no NUM_ACTIONS
+# change — Khanh's choice), so this never touches the network's output layer
+# or invalidates existing weights that way: whenever a living individual's
+# energy is >= ENERGY_TO_REPRODUCE at the end of a tick, it reproduces if
+# there's still room under MAX_POPULATION and a free cell exists next to it
+# (see World.random_adjacent_cell). See src/rl/population.py for the actual
+# mechanics — kept as a NEW module layered on top of World/Agent/world_tick/
+# TorchQAgent/compute_reward without modifying any of them (they turned out
+# to already be multi-agent-safe: every call takes agent/brain/state as
+# explicit parameters, nothing is stored as a single global "the agent").
+ENERGY_TO_REPRODUCE      = 75.0   # of MAX_ENERGY=100 — comfortably fed, not starving
+REPRODUCTION_ENERGY_COST = 40.0   # deducted from parent on an actual birth; the
+                                  # ONLY throttle on how often one individual can
+                                  # reproduce (energy must climb back above the
+                                  # threshold again — no separate cooldown timer)
+REPRODUCE_BONUS          = 4.0    # reward bonus for the PARENT the tick it
+                                  # reproduces (comparable to eating food_high) —
+                                  # gives backprop a direct incentive to reach
+                                  # reproductive fitness, not just relying on
+                                  # cross-generation selection to notice it works
+MUTATION_STD             = 0.05   # std of Gaussian noise added to EVERY weight
+                                  # of a COPY of the parent's network ("biến dị
+                                  # gen") — small relative to typical Conv2d/
+                                  # Linear init scales, so children start close
+                                  # to parent behavior, not randomized from scratch
+MAX_POPULATION            = 12    # hard cap on simultaneous living individuals —
+                                  # same purpose as MAX_FOOD_ON_WORLD: N separate
+                                  # networks means N forward passes/tick, so this
+                                  # also directly bounds per-tick compute cost
+INITIAL_POPULATION        = 1     # how many founder individuals start a run
+CHILD_INITIAL_EPSILON     = 0.3   # child's exploration starts here, not
+                                  # EPSILON_START=1.0 — it inherits reasonable
+                                  # starting behavior from its parent's weights,
+                                  # so re-exploring from total randomness would
+                                  # waste that; matches the "resuming training"
+                                  # default (0.3) used elsewhere in the project
+
 # ── Checkpointing (best-model tracking + periodic saves) ─────────────────────
 # Training used to save weights ONLY once, after the entire run finished:
 # (1) a crash/interrupt mid-run lost all progress, and (2) the final weights
@@ -330,3 +387,11 @@ DEMO_EPSILON   = 0.1      # demo-recording exploration (mostly-greedy; a touch
                           # of noise lets a greedy agent escape deterministic
                           # oscillation between two states — see visualize note)
 DEMO_FPS       = 5
+
+# ── Ecosystem run configuration (experiments/phase6_ecosystem/run_ecosystem.py) ──
+NUM_ECOSYSTEM_TICKS     = 3000   # default length of an ecosystem run
+ECOSYSTEM_SNAPSHOT_EVERY = 10    # record 1 GIF frame every N ticks (recording
+                                 # every single tick over thousands of ticks
+                                 # would make an unreasonably large/slow GIF)
+ECOSYSTEM_LOG_EVERY      = 50    # console/CSV progress line frequency
+ECOSYSTEM_GIF_FPS        = 10

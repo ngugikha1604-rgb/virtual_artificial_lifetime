@@ -98,6 +98,23 @@ class LSTMReplayBuffer:
                 windows.append(ep[start:start + window_n])
         return windows
 
+    def current_tail(self, window_n):
+        """The most recent up-to-window_n ticks of the CURRENTLY IN-PROGRESS
+        episode (not yet closed by done=True). Returns [] if fewer than 2
+        ticks have been pushed yet (no learnable transition).
+
+        Added for src/rl/population.py's ecosystem individuals: each one only
+        ever lives ONE episode, so len(self) (closed-episode count) can never
+        reach MIN_EPISODES during its own life, and sample_windows()'s "K
+        random CLOSED episodes" model doesn't fit at all — there is nothing
+        to sample from until after death, by which point the individual is
+        gone. Learning from the live tail of your own unfolding life instead
+        of a pool of past lives is the only thing that makes sense here.
+        """
+        if len(self._current) < 2:
+            return []
+        return self._current[-window_n:]
+
     def start_episode(self):
         """Signal the buffer that a new lifetime has begun; discards any
         un-closed (aborted) partial episode from an interrupted run."""

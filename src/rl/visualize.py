@@ -31,15 +31,13 @@ TERRAIN_COLORS = {
 
 
 def snapshot(world, agent, step, event):
-    """One frame's worth of drawable state. Public (not `_snapshot`) so
-    run_episode.py can reuse it to record an ACTUAL training lifetime
-    in-place (see run_episode.run_episode(..., record=True)) instead of
-    only being able to record a separate, untracked demo episode."""
+    """One frame's worth of drawable state."""
     return {
         "step": step, "position": agent.position, "facing": agent.facing,
         "food_low_positions":     list(world.positions_by_type("food_low")),
         "food_high_positions":    list(world.positions_by_type("food_high")),
         "food_starter_positions": list(world.positions_by_type("food_starter")),
+        "rotten_food_positions":  list(world.positions_by_type("rotten_food")),
         "hazard_positions":       list(world.positions_by_type("hazard")),
         "seed_positions":         list(world.seeds.keys()),
         "energy": agent.energy, "health": agent.health, "event": event,
@@ -76,6 +74,8 @@ def save_lifetime_gif(frames, width, height, output_path, fps=5, terrain=None):
                                    linestyle="None",label="Food (high)")
     food_starter_dots,=ax_world.plot([],[],marker="D",color="mediumvioletred",markersize=10,
                                       linestyle="None",label="Food (starter)")
+    rotten_dots,=ax_world.plot([],[],marker="*",color="saddlebrown",markersize=12,
+                                linestyle="None",label="Rotten food")
     hazard_dots,=ax_world.plot([],[],marker="X",color="crimson",markersize=16,
                                 linestyle="None",label="Hazard")
     ax_world.legend(loc="upper right",fontsize=7)
@@ -108,6 +108,8 @@ def save_lifetime_gif(frames, width, height, output_path, fps=5, terrain=None):
                                  [p[1] for p in fr["food_high_positions"]])
         food_starter_dots.set_data([p[0] for p in fr["food_starter_positions"]],
                                     [p[1] for p in fr["food_starter_positions"]])
+        rotten_dots.set_data([p[0] for p in fr["rotten_food_positions"]],
+                              [p[1] for p in fr["rotten_food_positions"]])
         hazard_dots.set_data([p[0] for p in fr["hazard_positions"]],
                               [p[1] for p in fr["hazard_positions"]])
 
@@ -117,9 +119,161 @@ def save_lifetime_gif(frames, width, height, output_path, fps=5, terrain=None):
         e_bar.set_height(e); e_bar.set_color("mediumseagreen" if e>30 else "tomato")
         h_bar.set_height(hp); h_bar.set_color("steelblue" if hp>50 else "darkorange")
         e_txt.set_text(f"{e:.0f}"); h_txt.set_text(f"{hp:.0f}")
-        return (agent_dot, seed_dots, food_low_dots, food_high_dots, food_starter_dots, hazard_dots,
-                step_text, e_bar, h_bar, e_txt, h_txt)
+        return (agent_dot, seed_dots, food_low_dots, food_high_dots, food_starter_dots,
+                rotten_dots, hazard_dots, step_text, e_bar, h_bar, e_txt, h_txt)
 
     anim=FuncAnimation(fig,update,frames=len(frames),interval=1000/fps,blit=False)
     anim.save(str(output_path),writer=PillowWriter(fps=fps))
+    plt.close(fig)
+
+
+def ecosystem_snapshot(world, population, step):
+    """One frame's worth of drawable state for the WHOLE ecosystem (multiple
+    agents at once) — the population analogue of snapshot() above. Public
+    for the same reason: experiments/run_experiment.py records the actual
+    running simulation, not a separate replay."""
+    return {
+        "step": step,
+        # Per-agent tuples (position, facing, is_free, generation) so the GIF
+        # can draw each agent with the correct facing marker and show a
+        # cooldown indicator — mirrors what save_lifetime_gif does for one agent.
+        "agents": [
+            (ind.agent.position, ind.agent.facing,
+             ind.agent.is_free, ind.generation)
+            for ind in population
+        ],
+        "food_low_positions":     list(world.positions_by_type("food_low")),
+        "food_high_positions":    list(world.positions_by_type("food_high")),
+        "food_starter_positions": list(world.positions_by_type("food_starter")),
+        "rotten_food_positions":  list(world.positions_by_type("rotten_food")),
+        "hazard_positions":       list(world.positions_by_type("hazard")),
+        "seed_positions":         list(world.seeds.keys()),
+        "population_size":        len(population),
+        "max_generation":         max((ind.generation for ind in population), default=0),
+    }
+
+
+def save_ecosystem_gif(frames, width, height, output_path, fps=10, terrain=None):
+    """Like save_lifetime_gif() but for a whole population at once.
+
+    Each agent is drawn with a directional marker matching its facing
+    (^/>/</ v  same as the single-agent GIF and live_viewer) and colored
+    by generation — gen 0 founders are royalblue, later generations shift
+    toward warmer hues so lineage depth is readable at a glance.
+    Agents on cooldown (busy) are drawn slightly smaller and semi-transparent.
+    The right panel shows population size over time (replaces the single-agent
+    energy/health bars, which don't summarise a whole population).
+    """
+    FACING_MARKERS = {0: "^", 1: ">", 2: "v", 3: "<"}
+    # Generation -> color: gen 0 blue, gen 1 teal, gen 2 green, gen 3+ orange/red
+    GEN_COLORS = ["royalblue", "mediumseagreen", "goldenrod", "tomato", "mediumpurple"]
+
+    fig, (ax_world, ax_pop) = plt.subplots(1, 2, figsize=(12, 6),
+                                           gridspec_kw={"width_ratios": [1, 1]})
+    fig.subplots_adjust(top=0.85)
+    fig.suptitle("Virtual Ecosystem", y=0.97)
+
+    ax_world.set_xlim(-0.5, width - 0.5)
+    ax_world.set_ylim(-0.5, height - 0.5)
+    ax_world.set_xticks(range(width))
+    ax_world.set_yticks(range(height))
+    ax_world.grid(True, linewidth=0.5, color="lightgray")
+    ax_world.set_aspect("equal")
+    ax_world.set_title("World", fontsize=10)
+
+    if terrain is not None:
+        img = np.array([[TERRAIN_COLORS.get(int(terrain[x, y]), (1, 1, 1))
+                         for x in range(width)] for y in range(height)])
+        ax_world.imshow(img, extent=(-0.5, width - 0.5, -0.5, height - 0.5),
+                        origin="lower", zorder=0)
+
+    # Static entity artists (food/hazard/seeds don't need per-agent iteration)
+    seed_dots,      = ax_world.plot([], [], marker=".", color="yellowgreen",
+                                    markersize=8, linestyle="None", label="Seed")
+    food_low_dots,  = ax_world.plot([], [], marker="*", color="orange",
+                                    markersize=14, linestyle="None", label="Food (low)")
+    food_high_dots, = ax_world.plot([], [], marker="*", color="gold",
+                                    markersize=22, linestyle="None", label="Food (high)")
+    food_starter_dots, = ax_world.plot([], [], marker="D", color="mediumvioletred",
+                                       markersize=10, linestyle="None", label="Food (starter)")
+    rotten_dots,    = ax_world.plot([], [], marker="*", color="saddlebrown",
+                                    markersize=12, linestyle="None", label="Rotten food")
+    hazard_dots,    = ax_world.plot([], [], marker="X", color="crimson",
+                                    markersize=16, linestyle="None", label="Hazard")
+    ax_world.legend(loc="upper right", fontsize=6, framealpha=0.55,
+                    handletextpad=0.3, borderpad=0.3, labelspacing=0.25)
+    step_text = ax_world.text(0.02, 1.03, "", transform=ax_world.transAxes, fontsize=9)
+
+    # Per-agent artists: one matplotlib Line2D per agent slot (up to MAX_POPULATION).
+    # We pre-create a fixed pool and hide unused slots each frame — this avoids
+    # adding/removing artists mid-animation (expensive, causes blit glitches).
+    from config import MAX_POPULATION
+    agent_artists = []
+    for i in range(MAX_POPULATION):
+        col = GEN_COLORS[min(i, len(GEN_COLORS) - 1)]
+        dot, = ax_world.plot([], [], marker="^", color=col,
+                             markersize=14, linestyle="None",
+                             markeredgecolor="white", markeredgewidth=1.0)
+        agent_artists.append(dot)
+
+    # Population chart
+    max_pop = max((fr["population_size"] for fr in frames), default=1)
+    ax_pop.set_xlim(0, max(len(frames) - 1, 1))
+    ax_pop.set_ylim(0, max_pop + 2)
+    ax_pop.set_title("Population over time", fontsize=10)
+    ax_pop.set_xlabel("frame")
+    ax_pop.set_ylabel("living individuals")
+    pop_line, = ax_pop.plot([], [], color="royalblue")
+    pop_text  = ax_pop.text(0.02, 0.95, "", transform=ax_pop.transAxes,
+                            fontsize=9, va="top")
+
+    def update(i):
+        fr = frames[i]
+        agents = fr.get("agents", [])  # list of (pos, facing, is_free, generation)
+
+        # Update per-agent markers
+        for slot, dot in enumerate(agent_artists):
+            if slot < len(agents):
+                pos, facing, is_free, gen = agents[slot]
+                dot.set_data([pos[0]], [pos[1]])
+                dot.set_marker(FACING_MARKERS[facing])
+                dot.set_color(GEN_COLORS[min(gen, len(GEN_COLORS) - 1)])
+                dot.set_markersize(14 if is_free else 9)
+                dot.set_alpha(1.0 if is_free else 0.55)
+                dot.set_visible(True)
+            else:
+                dot.set_visible(False)
+
+        seed_dots.set_data([p[0] for p in fr["seed_positions"]],
+                           [p[1] for p in fr["seed_positions"]])
+        food_low_dots.set_data([p[0] for p in fr["food_low_positions"]],
+                               [p[1] for p in fr["food_low_positions"]])
+        food_high_dots.set_data([p[0] for p in fr["food_high_positions"]],
+                                [p[1] for p in fr["food_high_positions"]])
+        food_starter_dots.set_data([p[0] for p in fr["food_starter_positions"]],
+                                   [p[1] for p in fr["food_starter_positions"]])
+        rotten_dots.set_data([p[0] for p in fr["rotten_food_positions"]],
+                             [p[1] for p in fr["rotten_food_positions"]])
+        hazard_dots.set_data([p[0] for p in fr["hazard_positions"]],
+                             [p[1] for p in fr["hazard_positions"]])
+
+        busy_count = sum(1 for _, _, is_free, _ in agents if not is_free)
+        status = ""
+        if busy_count:
+            status = f"  ({busy_count} on cooldown)"
+        step_text.set_text(f"tick {fr['step']}  pop={fr['population_size']}"
+                           f"  max_gen={fr['max_generation']}{status}")
+
+        xs = list(range(i + 1))
+        ys = [frames[j]["population_size"] for j in range(i + 1)]
+        pop_line.set_data(xs, ys)
+        pop_text.set_text(f"gen: {fr['max_generation']}")
+
+        return tuple(agent_artists) + (seed_dots, food_low_dots, food_high_dots,
+                                       food_starter_dots, rotten_dots, hazard_dots,
+                                       step_text, pop_line, pop_text)
+
+    anim = FuncAnimation(fig, update, frames=len(frames),
+                         interval=1000 / fps, blit=False)
+    anim.save(str(output_path), writer=PillowWriter(fps=fps))
     plt.close(fig)

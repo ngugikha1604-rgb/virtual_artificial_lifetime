@@ -12,7 +12,8 @@ from config import (VISION_RANGE, VISION_WIDTH, BEHIND_ROWS,
                     NUM_WALL_SEGMENTS, WALL_SEGMENT_LEN, SOIL_FRACTION,
                     FOOD_SEED_BASE_RATE, FOOD_SEED_SPREAD_BONUS,
                     FOOD_SEED_MATURATION_MIN, FOOD_SEED_MATURATION_MAX,
-                    FOOD_GROWTH_TYPE_SPLIT, MAX_FOOD_ON_WORLD)
+                    FOOD_GROWTH_TYPE_SPLIT, MAX_FOOD_ON_WORLD,
+                    FOOD_AGE_STAGE_TICKS)
 
 
 class World:
@@ -87,6 +88,11 @@ class World:
         # code intentionally == food_low's (see class docstring) — NOT a new
         # one-hot channel, so NUM_CELL_CLASSES stays 8, not 9.
         "food_starter": {"code": 5, "category": "food", "respawns": False},
+        # Rotten food: gets its OWN code/channel (8) so the network can
+        # distinguish it from fresh food. Eating it applies a negative energy
+        # effect (see config.FOOD_EFFECTS). "respawns": False — it simply
+        # disappears once eaten (or after its aging stage expires).
+        "rotten_food":  {"code": 8, "category": "food", "respawns": False},
     }
 
     def __init__(self, width=WORLD_SIZE, height=WORLD_SIZE,
@@ -116,6 +122,7 @@ class World:
         }
         self.entities = []  # list of {"type": str, "pos": (x, y)}
         self.seeds = {}     # {(x, y): ticks_remaining} — pending food growth, see _advance_food_growth
+        self.food_ages = {} # {id(entity): ticks_at_current_stage} — food aging, see _advance_food_aging
         self._init_terrain()   # BEFORE entities: entity spawn avoids wall cells
         self._init_entities()
 
@@ -228,6 +235,22 @@ class World:
             cell = (np.random.randint(0, self.width), np.random.randint(0, self.height))
             if cell not in occupied:
                 return cell
+
+    def random_adjacent_cell(self, pos):
+        """A free (non-wall), in-bounds cell orthogonally adjacent to `pos`,
+        or None if all 4 neighbors are wall/out-of-bounds. Used by
+        src/rl/population.py to place a newborn agent next to its parent.
+        Does NOT consider other agents' positions — agents don't block or
+        occupy cells exclusively from each other's perspective in this first
+        ecosystem phase (see progress.md), only terrain/entities matter here,
+        exactly like every other placement helper in this file."""
+        x, y = pos
+        candidates = [(x+1, y), (x-1, y), (x, y+1), (x, y-1)]
+        candidates = [c for c in candidates
+                     if self._in_bounds(c) and self.terrain[c[0], c[1]] != self.CELL_WALL]
+        if not candidates:
+            return None
+        return candidates[np.random.randint(len(candidates))]
 
     def terrain_at(self, pos):
         """Terrain code at `pos`; out-of-bounds counts as wall (the world
@@ -411,7 +434,9 @@ class World:
             del self.seeds[pos]
             food_type = ("food_low" if np.random.random() < FOOD_GROWTH_TYPE_SPLIT["food_low"]
                         else "food_high")
-            self.entities.append({"type": food_type, "pos": pos})
+            entity = {"type": food_type, "pos": pos}
+            self.entities.append(entity)
+            self.food_ages[id(entity)] = (0, 0)   # (ticks_in_stage, stage_idx)
 
         # ---- 2. roll for new seeds (vectorized over the whole grid) ----
         num_food = len(self.positions_by_category("food"))
@@ -446,6 +471,63 @@ class World:
         for x, y in new_seed_cells:
             ticks = np.random.randint(FOOD_SEED_MATURATION_MIN, FOOD_SEED_MATURATION_MAX + 1)
             self.seeds[(int(x), int(y))] = int(ticks)
+
+    def _advance_food_aging(self):
+        """Advance the aging lifecycle of all food entities that have a tracked
+        age (food_starter is exempt — it exists until eaten, see config.py).
+
+        Lifecycle per stage (each stage = FOOD_AGE_STAGE_TICKS ticks):
+          food_low  -> food_high
+          food_high -> food_low
+          food_low  -> rotten_food
+          rotten_food -> removed from world
+
+        The stage counter is keyed by id(entity) in self.food_ages. When an
+        entity transitions, its age counter resets to 0 for the next stage.
+        When rotten_food expires, it's removed entirely (no respawn, no growth
+        credit — it just rots away). food_starter entities are never added to
+        food_ages so they are silently skipped here.
+        """
+        # Aging lifecycle transitions in order
+        NEXT_STAGE = {
+            "food_low":    "food_high",
+            "food_high":   "food_low",
+            # second food_low stage -> rotten: tracked by counting transitions
+            "rotten_food": None,   # None = remove from world
+        }
+        # food_low can be either "stage 1" (-> food_high) or "stage 3" (-> rotten).
+        # We track this by storing the number of completed transitions per entity
+        # in food_ages as (ticks_in_stage, completed_transitions).
+        # For simplicity: food_ages[id] = [ticks_elapsed, stage_index]
+        # stage_index: 0=food_low->high, 1=food_high->low, 2=food_low->rotten, 3=rotten->gone
+
+        to_remove = []
+        for entity in list(self.entities):
+            eid = id(entity)
+            if eid not in self.food_ages:
+                continue   # food_starter or entity not tracked
+            ticks, stage_idx = self.food_ages[eid]
+            ticks += 1
+            if ticks < FOOD_AGE_STAGE_TICKS:
+                self.food_ages[eid] = (ticks, stage_idx)
+                continue
+            # Stage complete — advance
+            next_stage_idx = stage_idx + 1
+            if next_stage_idx == 1:
+                entity["type"] = "food_high"
+            elif next_stage_idx == 2:
+                entity["type"] = "food_low"
+            elif next_stage_idx == 3:
+                entity["type"] = "rotten_food"
+            else:
+                # rotten stage done -> remove
+                to_remove.append(entity)
+                del self.food_ages[eid]
+                continue
+            self.food_ages[eid] = (0, next_stage_idx)
+
+        for entity in to_remove:
+            self.entities.remove(entity)
 
     def entity_at(self, pos):
         for e in self.entities:
@@ -604,8 +686,10 @@ class World:
                 if spec.get("respawns", True):
                     self._respawn_entity(entity, avoid_position=new_pos)
                 else:
+                    self.food_ages.pop(id(entity), None)   # clean up age tracker
                     self.entities.remove(entity)
 
         self.time += 1
         self._advance_food_growth()
+        self._advance_food_aging()
         return new_pos, new_facing, event, entered_water

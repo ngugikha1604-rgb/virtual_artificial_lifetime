@@ -75,7 +75,11 @@ def compute_reward(event, prev_pos, prev_facing, new_pos, world, starved=False,
     if event is not None and event["category"] == "food":
         reward += FOOD_BONUS[event["type"]]
     else:
+        # Only shape toward non-rotten food — rotten food has a negative bonus
+        # when eaten, so pulling the agent toward it would be counterproductive.
         visible_food = world.visible_entity_positions(prev_pos, prev_facing, category="food")
+        visible_food = [p for p in visible_food
+                        if world.entity_at(p) and world.entity_at(p)["type"] != "rotten_food"]
         deltas = _nearest_dist_delta(prev_pos, new_pos, visible_food)
         if deltas is not None:
             prev_d, new_d = deltas

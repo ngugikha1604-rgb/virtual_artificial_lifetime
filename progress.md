@@ -833,3 +833,103 @@ giờ vẫn có thể bị ghi đè bởi checkpoint định kỳ (`SAVE_EVERY`)
  nhưng làm thang đo tổng `total_reward` tăng đáng kể (mỗi lifetime cộng thêm hàng chục
  điểm từ age bonus) — đừng so trực tiếp `total_reward` trước/sau thay đổi này, không phản
  ánh đúng "agent giỏi hơn hay tệ hơn", chỉ là đổi thang đo.
+
+---
+
+## 🌱 Reproduction / Ecosystem (2026-09) — thay đổi lớn nhất từ đầu dự án
+
+### Mục đích & kết quả mong đợi
+
+Khanh muốn thêm sinh sản: agent đủ năng lượng thì sinh ra agent con, kế thừa gần như
+ y hệt weight cha + biến dị ngẫu nhiên ("gen") — để dần hình thành **1 hệ sinh thái**
+ thật sự, thay vì chỉ 1 agent đơn độc sống-chết lặp lại. Đây chính là ranh giới
+ **multi-agent** đã cảnh báo từ rất sớm trong dự án (lúc đánh giá "world xong bao nhiêu %").
+
+**Kết quả mong đợi**: nhiều agent sống đồng thời, sinh sản/chết tự nhiên qua nhiều thế
+ hệ, quan sát được cả **học cá nhân** (backprop trong đời) lẫn **tiến hoá quần thể**
+ (chọn lọc gen qua các thế hệ) cùng lúc.
+
+### 3 quyết định cốt lõi (theo Khanh chốt)
+1. **Hybrid nature+nurture**: agent con vẫn học backprop trong lúc sống (không chỉ weight
+   cố định kế thừa), CỘNG thêm kế thừa+biến dị lúc sinh.
+2. Sinh sản **tự động** khi đủ năng lượng (không thêm action mới → không đổi kích thước
+   network → không invalidate brain cũ vì lý do này).
+3. Trần dân số `MAX_POPULATION=12`.
+
+### Kiến trúc — phát hiện bất ngờ: World/world_tick KHÔNG CẦN SửA GÌ
+Cả `World` lẫn `world_tick()` từ trước đến giờ đều nhận agent/brain/state qua tham số
+ rõ ràng, không lưu "agent duy nhất" kiểu global state nào cả — nên gọi chúng nhiều lần/tick
+ cho nhiều agent khác nhau trên CÙNG 1 world là đúng đắn ngay từ đầu, không cần đổi gì.
+Đây là kết quả tự nhiên của nguyên tắc "state đi qua tham số, không phải biến toàn cục"
+ đã giữ xuyên suốt dự án. Chỉ thêm đúng 1 method mới: `World.random_adjacent_cell(pos)`
+ (tìm ô trống cạnh vị trí cha để đặt agent con).
+
+### File mới: `src/rl/population.py`
+- `Individual`: gói đầy đủ 1 agent sống — body (`Agent`), brain riêng (`TorchQAgent` — net +
+  optimizer + target net **riêng từng con**), replay buffer riêng, policy riêng, `x/h/c` riêng,
+  và `total_reward` tích luỹ (fitness score của riêng nó).
+- `spawn_founder()` / `mutate_weights()` / `reproduce()`: tạo mới, biến dị (Gaussian noise
+  `MUTATION_STD=0.05` trên **bản copy** weight cha, cha không bị đụng), sinh con (trừ năng
+  lượng cha, chỉ khi còn chỗ dưới `MAX_POPULATION` và có ô trống cạnh cha).
+- `ecosystem_step(world, population, auto_reseed=True)`: 1 tick cho **cả quần thể** — xáo
+  thứ tự xử lý mỗi tick (công bằng tranh chấp food), gọi `world_tick()` y hệt code đơn-agent
+  cho từng agent, xử lý chết/sinh, `auto_reseed=False` để tắt tự động hồi sinh khi tuyệt
+  chủng (dùng cho `live_viewer.py`).
+
+### 🐛 Lỗi quan trọng phát hiện + sửa trong lúc test (không phải chuyện nhỏ)
+
+**1. Agent con không bao giờ học được gì cả (im lặng, không crash)**: `LSTMReplayBuffer`
+ cũ chỉ cho `sample_windows()` từ các episode **đã đóng**, nhưng mỗi Individual trong
+ ecosystem chỉ sống đúng **1 lần** (1 episode, luôn đang mở đến lúc chết) — nên
+ `MIN_EPISODES=10` không bao giờ đúng, `learn_windows` không bao giờ được gọi. Đã thêm
+ `LSTMReplayBuffer.current_tail(window_n)` — học từ **đuôi của chính đời đang diễn ra**
+ thay vì sample từ pool đời cũ (không hề tồn tại với 1 cá thể). Đã verify trực tiếp:
+ weight thật sự thay đổi qua các tick.
+
+**2. Ghi đĩa liên tục mỗi tick nếu check sai cách**: nếu check "best mới" trên cả quần
+ thể sống MỖI TICK, bất kỳ con đầu bảng nào đang sống cũng tự động "phá kỷ lục" mỗi tick
+ (vì `total_reward` của nó luôn tăng) → ghi file liên tục, rất lãng phí. Đã sửa:
+ `check_and_save_best()` tách riêng — check `deaths` (sự kiện hiếm, điểm đã chốt) MỖI
+ tick, check quần thể đang sống chỉ MỖI `SAVE_EVERY` tick. Giảm từ hàng chục lần ghi/1000
+ tick xuống còn **5 lần**.
+
+**3. `live_viewer.py` ghi đè `best_model.pt` bằng model TỆ HƠN (nghiêm trọng nhất)**:
+ phiên bản đầu tiên khởi tạo `best_metric_so_far = -inf` mỗi lần mở viewer, không đọc
+ `training_state.json` cũ — verify thực tế: mở viewer sau khi đã có best=+19.10, chạy một
+ lúc, kết thúc đã ghi đè thành -37.45 (**mất trắng tiến độ training trước đó**). Đã sửa:
+ `_load_founder_net()` giờ đọc `training_state.json` ngay từ đầu, `best_metric_so_far` kế
+ thừa đúng giá trị đã lưu. Đã verify lại: sau khi sửa, chạy 500 tick không hề làm giảm
+ `best_metric_so_far` xuống dưới baseline đã load.
+
+### `run_experiment.py` — viết lại hoàn toàn, chuyển sang ecosystem
+Thế chỗ hẳn vòng lặp đơn-agent tuần tự cũ. Giờ: nạp `best_model.pt` làm founder (không biến
+ dị — chỉ con mới bị biến dị, founder là đường tiếp nối trực tiếp từ brain đã lưu), chạy
+ `--ticks` tick (thay `--lifetimes`), mỗi tick check best qua `check_and_save_best`. "Best" giờ
+ là **best individual từng thấy trong toàn bộ quần thể** (`total_reward` của riêng nó), không
+ còn là rolling-mean qua nhiều lifetime như trước. Vẫn chỉ 1 file `best_model.pt` duy nhất.
+Đã verify: chạy mới → sinh nhiều thế hệ (tới gen 10 trong 1000 tick) → resume đúng (nạp
+ lại weight + epsilon + best_metric) → tốc độ ghi đĩa hợp lý (5 lần/1000 tick).
+
+### `live_viewer.py` — viết lại hoàn toàn, trở thành "xem thế giới" thay vì "xem 1 lifetime"
+- Chạy **vô hạn**, không giới hạn lifetime — chỉ dừng khi **tuyệt chủng thật**
+  (`auto_reseed=False`, khác với `run_experiment.py`) hoặc bấn **R** (nạp lại quần thể mới từ
+  `best_model.pt`, không phải random trắng).
+- Vẫn load/lưu **đúng cùng 1 file** `best_model.pt` với `run_experiment.py`.
+- Vẽ **tất cả agent đang sống** trên world (không chỉ 1), mỗi con đúng hướng mặt — con
+  đang được "spotlight" (agent già nhất còn sống, sticky theo id để không nhảy loạn) có
+  viền vàng riêng để phân biệt.
+- Panel bên phải: local vision + Q-value của spotlight, cộng thêm thống kê quần thể
+  (số lượng, thế hệ cao nhất, sinh/chết trong phiên, best fitness đã lưu).
+- Phím S / thoát: gọi `check_and_save_best` trên quần thể hiện tại.
+
+**Đã verify đầy đủ bằng chạy thật (headless)**: reset sau tuyệt chủng hoạt động đúng, vẫn
+ giữ best_metric qua reset, `draw()` không lỗi với nhiều agent cùng lúc.
+
+### Phạm vi chưa làm (cố tình, theo đúng scope đã nói trước khi làm)
+- Agent không nhìn thấy nhau, không va chạm/chặn ô của nhau — tương tác duy nhất là gián
+  tiếp qua tranh food/không gian chung.
+- `run_ecosystem.py` (phase6, xây trước `run_experiment.py` được viết lại) giờ **dư
+  thừa** phần lớn chức năng (không có checkpointing) — vẫn để nguyên, chưa xóa vì không
+  được yêu cầu.
+- Không có cross-run persistence cho riêng quần thể (mỗi lần chạy `run_experiment.py`
+  founder lại từ 1 brain, không lưu lại toàn bộ cây phả hệ).
