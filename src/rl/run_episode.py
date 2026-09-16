@@ -163,7 +163,11 @@ def run_episode(world, agent, brain, replay, train=True, render=False, record=Fa
                                 survived_full_life=(result.done and agent.health > 0))
         # Phase B: store the tick in the current EPISODE with its pre-tick
         # hidden (h,c) as the anchor so a later window can unroll from it.
-        replay.push(x, h, c, result.action, reward, result.done)
+        # Use result.x_used (the observation actually fed to the brain) for
+        # consistency — in single-agent mode this equals x, but using x_used
+        # explicitly keeps the invariant "(obs, action) are always paired
+        # correctly" regardless of whether channel 9 was injected.
+        replay.push(result.x_used, h, c, result.action, reward, result.done)
         if train and len(replay) >= MIN_EPISODES and steps % LEARN_EVERY == 0:
             brain.learn_windows(replay.sample_windows(BATCH_SIZE, WINDOW_N))
 

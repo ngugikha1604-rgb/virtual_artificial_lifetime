@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Results (generated artifacts — not source)
+results/best_model.pt
+results/training_state.json
+results/ecosystem_lifetime.gif
+results/ecosystem_log.csv

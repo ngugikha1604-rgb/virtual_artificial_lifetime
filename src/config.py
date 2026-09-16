@@ -167,17 +167,22 @@ VIEW_W         = VISION_WIDTH                 # observation grid columns (4)
 NUM_ACTIONS     = 5       # 0=stay,1=fwd,2=bwd,3=turnL,4=turnR
 HIDDEN_SIZE     = 64      # LSTM hidden size
 
-# Multi-hot channels: one binary channel per cell code 0..8:
+# Multi-hot channels: one binary channel per cell code 0..9:
 #   0=unknown, 1=wall, 2=water, 3=soil, 4=grass,
-#   5=food_low, 6=food_high, 7=hazard, 8=rotten_food.
+#   5=food_low, 6=food_high, 7=hazard, 8=rotten_food, 9=other_agent.
 # food_starter reuses food_low's code 5 (see World docstring).
 # rotten_food gets its OWN channel (8) so the network can distinguish
-# "food that will hurt me" from "food that will help me" — this is the
-# whole point of adding it as a separate observable type.
-# NOTE: bumping this from 8 to 9 changes OBS_GRID_FLAT / OBS_SIZE /
+# "food that will hurt me" from "food that will help me".
+# other_agent (9) is a binary channel: 1 wherever another living agent
+# occupies a cell inside the vision cone, 0 everywhere else. All agents
+# are treated as the same type — the network sees only "someone is there",
+# not who or what generation. Behind-agent rows are always 0 (same as other
+# channels: unknown territory). Injected by world_tick, not World, since
+# World has no concept of "other agents" (see population.py's module doc).
+# NOTE: bumping this from 9 to 10 changes OBS_GRID_FLAT / OBS_SIZE /
 # INPUT_SIZE / CONV_OUT — all saved weights (best_model.pt) are now
 # incompatible and must be retrained from scratch.
-NUM_CELL_CLASSES = 9      # len of World cell-code alphabet (0..8 incl. unknown + rotten)
+NUM_CELL_CLASSES = 10     # len of World cell-code alphabet (0..9)
 
 # Conv2D that maps the multi-channel local view down to spatial features.
 # Same-pad convolution preserves the input spatial size, so the feature map is

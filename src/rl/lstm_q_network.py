@@ -41,21 +41,16 @@ from config import NUM_CELL_CLASSES, HIDDEN_SIZE
 
 
 # 1. Pure NumPy observation builders
-def _multi_hot_grid(terrain_grid, entity_grid):
+def _multi_hot_grid(terrain_grid, entity_grid, other_agent_grid=None):
     """
     terrain_grid, entity_grid (H, W) int arrays from
     World.get_local_view_layers() -> multi-hot (NUM_CELL_CLASSES, H, W).
 
-    Each cell sets its terrain-code bit (always exactly one, since terrain
-    incl. "unknown" is mutually exclusive with itself) AND, independently,
-    its entity-code bit if entity_grid says one is present (-1 means none).
-    This is a TRUE multi-channel binary encoding, not one-hot: a cell can
-    have 2 bits set (terrain + entity) or just 1 (terrain alone, or
-    "unknown" alone for behind-agent cells, which never carries an entity).
-
-    The spatial size is taken from the grids' own shape (H and W need not be
-    equal), so it stays correct for any VISION_RANGE / VISION_WIDTH combo in
-    config without hard-coding the view dimensions here.
+    Each cell sets its terrain-code bit (always exactly one) AND, independently,
+    its entity-code bit if an entity is present (-1 means none). If
+    `other_agent_grid` is provided (bool/int H×W array), any cell with a 1
+    also sets channel 9 ("other agent present here"). Behind-agent rows have
+    other_agent_grid=0 by convention (callers fill them as zeros).
     """
     C = NUM_CELL_CLASSES
     h, w = terrain_grid.shape
@@ -67,12 +62,22 @@ def _multi_hot_grid(terrain_grid, entity_grid):
         e = entity_flat[n]
         if e >= 0:
             multi[e, n] = 1.0
+    if other_agent_grid is not None:
+        agent_flat = np.asarray(other_agent_grid, dtype=bool).reshape(-1)
+        multi[9, agent_flat] = 1.0
     return multi.reshape(C, h, w)
 
 
-def encode_observation(terrain_grid, entity_grid, internal_state):
-    """(terrain_grid, entity_grid) + body [(3,)] -> obs vector (OBS_SIZE,) float32."""
-    multi = _multi_hot_grid(terrain_grid, entity_grid)
+def encode_observation(terrain_grid, entity_grid, internal_state,
+                       other_agent_grid=None):
+    """(terrain_grid, entity_grid) + body [(3,)] -> obs vector (OBS_SIZE,) float32.
+
+    `other_agent_grid`: optional bool/int (H, W) array — True/1 wherever
+    another living agent occupies that cell in the local view. Defaults to
+    None (all-zeros channel 9), so single-agent callers (run_episode.py,
+    live_viewer.py) need no changes.
+    """
+    multi = _multi_hot_grid(terrain_grid, entity_grid, other_agent_grid)
     return np.concatenate([multi.reshape(-1),
                            np.asarray(internal_state, dtype=np.float32)
                            ]).astype(np.float32)

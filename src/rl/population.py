@@ -96,7 +96,11 @@ class Individual:
         self.h, self.c = zero_state()
         terrain_grid, entity_grid = world.get_local_view_layers(self.agent.position,
                                                                  self.agent.facing)
-        self.x = build_observation(terrain_grid, entity_grid, self.agent.internal_state)
+        # No other agents visible at birth (population not yet known here);
+        # the first real observation with other_agent_grid is built by
+        # ecosystem_step on the very first tick.
+        self.x = build_observation(terrain_grid, entity_grid,
+                                   self.agent.internal_state, None)
 
 
 def spawn_founder(world, epsilon=config.EPSILON_START, generation=0, net=None):
@@ -176,8 +180,21 @@ def ecosystem_step(world, population, auto_reseed=True):
     np.random.shuffle(order)
 
     births, deaths = [], []
+
+    # Snapshot all positions BEFORE anyone moves this tick — this is the
+    # "simultaneous tick" model: every agent observes the same consistent
+    # start-of-tick state when it decides its action, regardless of the
+    # sequential processing order imposed by the for-loop below. Without
+    # this, agents processed later would see a mix of pre- and post-move
+    # positions from agents processed earlier, which is neither simultaneous
+    # nor sequential — just inconsistent.
+    positions_snapshot = frozenset(ind.agent.position for ind in population)
+
     for ind in order:
-        result = world_tick(world, ind.agent, ind.brain, ind.x, ind.h, ind.c)
+        # Exclude this agent's own position from the "other agents" set.
+        other_pos = positions_snapshot - {ind.agent.position}
+        result = world_tick(world, ind.agent, ind.brain, ind.x, ind.h, ind.c,
+                            other_positions=other_pos)
 
         reward = compute_reward(result.event, result.prev_pos, result.prev_facing,
                                 ind.agent.position, world, starved=result.starved,
@@ -192,7 +209,10 @@ def ecosystem_step(world, population, auto_reseed=True):
 
         # Phase B: store the tick in ind's own episode with its PRE-tick
         # hidden (h,c) as the anchor — mirrors run_episode.py exactly.
-        ind.replay.push(ind.x, ind.h, ind.c, result.action, reward, result.done)
+        # Use result.x_used (the observation world_tick actually fed to the
+        # brain) rather than ind.x (the stored observation without channel 9
+        # injected), so the (obs, action) pair in the buffer is consistent.
+        ind.replay.push(result.x_used, ind.h, ind.c, result.action, reward, result.done)
         ind.total_reward += reward
         ind.x, ind.h, ind.c = result.x_next, result.h_new, result.c_new
         ind.steps += 1

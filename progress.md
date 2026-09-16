@@ -11,6 +11,35 @@
 > **kỳ vọng quan sát được gì** nếu đúng, không đi sâu "dùng công cụ/dòng code nào" (phần đó nằm
 > ở các mục kỹ thuật phía dưới, dùng khi cần debug).
 
+**8. Food expiration lifecycle (`food_low → food_high → food_low → rotten_food → biến mất`)**
+- Mục đích: world cũ có food tồn tại mãi mãi cho đến khi bị ăn — không có cảm giác "thời gian
+  trôi" hay áp lực phải hành động kịp. Lifecycle 4 stage (mỗi stage 5 tick) tạo ra trade-off
+  hành vi mới: ăn food_high khi nó đang ở đỉnh, hay chờ nó xuống thành food_low rồi mới ăn?
+  Có nên ăn rotten_food khi đói gần chết không (energy -10)?
+- Kết quả mong đợi: agent học được sự khác biệt giữa 3 loại food (fresh/high/rotten) qua channel
+  observation riêng biệt; hành vi "tìm food kịp lúc" trở nên quan sát được và có ý nghĩa hơn.
+- `rotten_food` có code channel 8 riêng (không dùng chung với food_low) — `NUM_CELL_CLASSES` tăng
+  8→9, **invalidate toàn bộ weight cũ**, cần train lại từ đầu. `food_starter` được miễn lifecycle
+  (tồn tại đến khi bị ăn — đây là mục đích thiết kế của nó).
+
+**9. Ecosystem GIF cải thiện — facing + cooldown + màu theo generation**
+- Mục đích: GIF cũ vẽ tất cả agent bằng tam giác `^` cố định, không phân biệt hướng nhìn hay
+  trạng thái cooldown — không đọc được hành vi gì từ đó.
+- Kết quả mong đợi: mỗi agent có marker đúng hướng (^/>/</ v), agent đang cooldown nhỏ/mờ hơn,
+  màu theo generation (xanh dương → xanh lá → vàng → đỏ) để thấy lineage đang lan rộng.
+
+**10. Agent con sinh ra với `EPSILON_START` (explore lại từ đầu)**
+- Mục đích: trước đó con sinh ra với `CHILD_INITIAL_EPSILON=0.3` — nhưng con thừa hưởng weight từ
+  bố/mẹ đã được mutate, nên hành vi ban đầu chưa được test đầy đủ. Reset về 1.0 để con explore
+  và build replay buffer của riêng mình trước khi exploit.
+- Kết quả mong đợi: mỗi thế hệ mới có thời gian khám phá thật sự, không chỉ copy behavior của
+  bố/mẹ ngay từ đầu.
+
+**11. Dọn dẹp cấu trúc thư mục**
+- `experiments/phase5_online_qlearning/run_experiment.py` → `experiments/run_experiment.py`
+- Xóa `experiments/phase6_ecosystem/` (run_ecosystem.py đã được thay thế hoàn toàn bởi run_experiment.py mới)
+- `CHILD_INITIAL_EPSILON` trong config.py không còn được dùng (có thể xóa sau)
+
 **1. Target network cho việc học (`learn_windows`)**
 - Mục đích: tránh việc network vừa là "người học" vừa là "thước đo để tự chấm điểm mình" cùng
   lúc — dễ gây dao động/không ổn định khi train lâu.
@@ -85,50 +114,9 @@ Vì mục tiêu học "hiểu từng dòng gradient" không còn là ưu tiên, 
 vào world/behavior/observability hợp lý hơn. **README.md đã được viết lại theo tinh thần mới** — đọc
 mục 1–5 ở đó trước khi đề xuất bất kỳ thay đổi kiến trúc nào liên quan đến "phải tự cài đặt".
 
-### Trạng thái lỗi hiện tại (CẦN THEO DÕI)
+### Trạng thái lỗi (đã giải quyết)
 
-Khanh báo là refactor này **vẫn còn lỗi**, chưa nói rõ lỗi gì. Bản thân codebase đọc tĩnh (static
-review) không phát hiện lỗi cú pháp/logic rõ ràng trong `torch_q_net.py`, `torch_agent.py`,
-`lstm_replay_buffer.py`, `world_tick.py`, `run_episode.py`, `live_viewer.py`, `visualize.py`,
-`model_io.py` — nhưng chưa được **chạy thử thật** (môi trường Claude hiện tại không có quyền chạy
-Python trên máy Windows của Khanh, và sandbox Linux của Claude không có `torch`/`pygame` cài sẵn).
-**Bước tiếp theo bắt buộc**: Khanh dán traceback lỗi cụ thể (từ `run_experiment.py`, `run_episode.py`,
-hoặc `live_viewer.py`) vào session tiếp theo để Claude debug đúng chỗ, thay vì đoán.
-
-**Cập nhật — đã thử chạy thật trong sandbox (Linux, CPU, torch 2.14, pygame 2.6.1, matplotlib
-3.10.8) và KHÔNG tái hiện được lỗi nào** ở các đường chạy sau:
-- `run_episode.main(num_lifetimes=15)` — training loop trần, kích hoạt cả `learn_windows` (buffer
-  vượt `MIN_EPISODES=10`) — chạy sạch.
-- `run_experiment.py --lifetimes 15` (brain mới) — train + save `.pt` + render GIF + ghi CSV — chạy
-  sạch, output số liệu hợp lý (food/reward tăng nhẹ qua 15 lifetime).
-- `run_experiment.py --lifetimes 5` chạy lần 2 (load `.pt` vừa lưu để train tiếp) — chạy sạch, xác
-  nhận `model_io.load_lstm_weights` hoạt động đúng với checkpoint torch thật.
-- `run_experiment.py --no-train` (load `.pt`, demo episode + GIF, không ghi đè CSV) — chạy sạch.
-- `live_viewer.py` chạy headless (`SDL_VIDEODRIVER=dummy`), bật training, 600 tick liên tục qua
-  nhiều lifetime — chạy sạch, không lỗi, không crash khi agent chết/reset giữa chừng.
-- 80 lifetime liên tục kiểm tra `torch.isnan()` trên toàn bộ parameters mỗi 10 lifetime — **không
-  có NaN/inf xuất hiện** ở bất kỳ điểm kiểm tra nào.
-- Ghi nhận tốc độ: ~1.2s/lifetime trung bình sau khi `learn_windows` bắt đầu chạy (buffer đủ
-  `MIN_EPISODES`) trên CPU sandbox — với `NUM_LIFETIMES=4000` mặc định, một lần chạy đầy đủ
-  `run_experiment.py` sẽ mất khoảng hơn 1 giờ trên phần cứng tương đương. Đây không phải lỗi,
-  nhưng đáng lưu ý nếu Khanh thấy chương trình "treo" khi chạy full — nhiều khả năng chỉ là đang
-  chạy chậm chứ không crash (đối chiếu bằng `PRINT_EVERY=100` — nếu vẫn thấy dòng log mới xuất
-  hiện định kỳ thì không phải bug, chỉ là chờ lâu).
-
-**Kết luận tạm thời**: lỗi Khanh gặp nhiều khả năng KHÔNG nằm ở luồng chạy "vanilla" mà 5 kịch bản
-trên bao phủ. Các khả năng còn lại, theo thứ tự nghi ngờ: (1) đặc thù Windows — ví dụ font
-`"segoeui"` trong `live_viewer.py` chỉ có trên Windows, có thể lỗi/fallback khác trên máy Khanh dù
-ở Linux sandbox thì Pygame fallback êm; (2) tương tác bàn phím thực tế trong `live_viewer.py`
-(phím R reset giữa lúc đang bận cooldown, phím S lưu weight, v.v.) — sandbox chỉ test được
-`step_simulation()` gọi trực tiếp, chưa test qua vòng lặp sự kiện Pygame thật; (3) có GPU/CUDA
-trên máy Khanh và lỗi chỉ xảy ra trên CUDA path (`torch.cuda.is_available()` → device khác); (4) lỗi
-xảy ra ở lifetime rất xa (hàng trăm/nghìn) mà 80-lifetime test chưa chạm tới; (5) lỗi không phải
-exception mà là **lỗi hành vi/logic** (VD agent vẫn "đứng yên"/"quay vòng" dù không crash) — nếu
-đúng vậy thì đây không phải bug kỹ thuật, mà là vấn đề tinh chỉnh reward/hyperparameter giống các
-lần trước.
-
-→ **Cần Khanh cho biết: lỗi cụ thể là gì (traceback, hay hành vi bất thường), chạy lệnh gì, và có
-GPU/CUDA trên máy không** — để không đoán mò tiếp.
+Lỗi torch refactor mà Khanh từng báo đã không tái hiện được qua nhiều lần chạy thật (xem chi tiết các kịch bản test trong lịch sử session). Codebase hiện tại chạy sạch trên Windows với Python 3.14, torch, pygame.
 
 ### Đã sửa thêm (2026-09, sau khi đối chiếu review của DeepSeek — 5/5 điểm DeepSeek nêu hoá ra
 ### KHÔNG áp dụng cho code hiện tại, xem hội thoại; nhưng nhân dịp review lại, đã tự sửa 2 điểm
@@ -183,11 +171,11 @@ quả của bản đã hết lỗi hay của một lần chạy trước khi l�
 ```text
 World (grid, mặc định 10×10, xem src/config.py)
   ↓  get_local_view(position, facing)
-  ↓  local view (VIEW_H × VIEW_W, mặc định 6×4), mỗi cell code int 0..5
+  ↓  local view (VIEW_H × VIEW_W, mặc định 6×4), mỗi cell code int 0..8
   ↓
 encode_observation() [NumPy, framework-agnostic]
-  ↓  one-hot (NUM_CELL_CLASSES=6, VIEW_H, VIEW_W) flatten + body-state(3)
-  ↓  = obs vector OBS_SIZE (mặc định 147), đây là cái được lưu trong replay
+  ↓  multi-hot (NUM_CELL_CLASSES=9, VIEW_H, VIEW_W) flatten + body-state(3)
+  ↓  = obs vector OBS_SIZE (mặc định 219), đây là cái được lưu trong replay
   ↓
 ConvLSTMDQN (torch.nn.Module, src/rl/torch_q_net.py)
   ├─ nn.Conv2d(NUM_CELL_CLASSES → CONV_FILTERS, k=3, same-pad) + ReLU
@@ -265,13 +253,16 @@ tầm nhìn). Đây là lý do chính đáng cho việc chuyển sang torch, ngo
 
 ### `world.py` — World (grid vuông, mặc định 10×10, entity system tổng quát)
 - Entity kiểu tổng quát: `entities: list[{"type", "pos"}]`, khai báo qua `ENTITY_SPECS`
-  (`food_low`, `food_high`, `hazard`). Thêm loại vật mới chỉ cần thêm 1 entry, không sửa
+  (`food_low`, `food_high`, `food_starter`, `rotten_food`, `hazard`). Thêm loại vật mới chỉ cần thêm 1 entry, không sửa
   grid/step logic.
 - `get_local_view(position, facing)`: trả về local view `(VIEW_H, VIEW_W)` xoay theo hướng nhìn
   (mặc định 6×4 = `VISION_RANGE(4) + BEHIND_ROWS(2)` hàng × `VISION_WIDTH(4)` cột — kích thước
   đọc từ `config.py`, không hard-code).
-- `step(action, position, facing)`: trả `(new_pos, new_facing, event)`. Food ăn xong respawn
-  ngay ở ô khác; hazard bắn event mỗi tick agent đứng trên đó (không bị tiêu thụ).
+- `step(action, position, facing)`: trả `(new_pos, new_facing, event, entered_water)`. Food không respawn ngay — thay vào đó
+  food mới chỉ xuất hiện qua cơ chế growth (`_advance_food_growth`). Hazard bắn event mỗi tick agent đứng trên đó.
+- `_advance_food_aging()`: mỗi tick, food tiến qua lifecycle: `food_low → food_high → food_low → rotten_food → biến mất`
+  (mỗi stage 5 tick — `FOOD_AGE_STAGE_TICKS`). `food_starter` được miễn, tồn tại đến khi bị ăn. `rotten_food` có
+  observation channel riêng (code 8) để agent phân biệt được.
 
 ### `agent.py` — Agent (body mechanics)
 - `internal_state = [energy/MAX, health/MAX, age/max_age]` (3 giá trị, nối vào sau one-hot
@@ -307,29 +298,32 @@ tầm nhìn). Đây là lý do chính đáng cho việc chuyển sang torch, ngo
 
 ### `run_episode.py`
 - `compute_reward()`: potential-based shaping cho food (kéo lại gần) và hazard (đẩy ra xa) +
-  bonus cố định khi ăn + phạt cố định khi đứng trên hazard — logic reward giữ nguyên từ bản
-  NumPy, chỉ có brain phía dưới đổi.
+  bonus cố định khi ăn + phạt cố định khi đứng trên hazard. Shaping food **lọc bỏ rotten_food**
+  — không kéo agent về phía đồ ăn hỏng.
 - `run_episode()`: vòng lặp 1 lifetime, gọi `world_tick`, đẩy vào `replay.push(...)`, gọi
   `brain.learn_windows(replay.sample_windows(...))` mỗi `LEARN_EVERY` tick (không phải mỗi tick).
-  Hỗ trợ `record=True` để lấy `frames` cho GIF từ ĐÚNG lifetime training thật, tránh bug cũ (GIF
-  từng được ghi từ một lifetime riêng chưa từng nằm trong CSV).
+  Hỗ trợ `record=True` để lấy `frames` cho GIF từ ĐÚNG lifetime training thật.
 
 ### `visualize.py`
-- `snapshot()` + `save_lifetime_gif()` — không đổi so với bản NumPy, vẽ bằng matplotlib.
+- `snapshot()` + `save_lifetime_gif()` — vẽ bằng matplotlib, bao gồm rotten_food (màu nâu `saddlebrown`).
+- `ecosystem_snapshot()` + `save_ecosystem_gif()` — vẽ nhiều agent cùng lúc với marker đúng hướng
+  theo facing, màu theo generation, cooldown indicator. Bao gồm rotten_food.
 
 ### `live_viewer.py`
 - Pygame interactive viewer, gọi `world_tick()` dùng chung. Phím `T` bật/tắt online-training
-  trực tiếp trong lifetime đang xem; `policy.decay()` gọi đúng 1 lần/lifetime (khi agent chết),
-  không phải mỗi tick. Phím `S` lưu weight thủ công; auto-save khi thoát nếu training đang bật.
+  trực tiếp; `policy.decay()` gọi đúng 1 lần/lifetime. Phím `S` lưu weight; auto-save khi thoát.
+  Vẽ rotten_food (circle nâu + X overlay).
 
-### `experiments/phase5_online_qlearning/run_experiment.py`
-- Entry point train + save + demo GIF + CSV trong 1 lệnh. Load `.pt` cũ để train tiếp nếu có
-  (bắt `ValueError` từ `model_io` nếu kiến trúc đổi → tạo brain mới). `--no-train` chỉ demo bằng
-  weight đã có, không train, không ghi đè CSV cũ.
+### `experiments/run_experiment.py`
+- Entry point chính. Chạy ecosystem multi-agent: load `best_model.pt` để khởi tạo population
+  (hoặc fresh nếu chưa có), gọi `ecosystem_step` mỗi tick, checkpoint cá thể tốt nhất vào
+  `best_model.pt`, render `ecosystem_lifetime.gif`, ghi `ecosystem_log.csv`.
+- `--reset-epsilon`: giữ weight, reset epsilon về `EPSILON_START`.
+- `--ticks N`: số tick chạy (mặc định `NUM_ECOSYSTEM_TICKS=3000`).
 
 ---
 
-## Cấu trúc thư mục hiện tại (đã xác nhận bằng cách đọc trực tiếp filesystem)
+## Cấu trúc thư mục hiện tại
 
 ```text
 virtual_lifetime/
@@ -348,23 +342,20 @@ virtual_lifetime/
 │       ├── lstm_q_network.py     encode_observation/build_observation, zero_state, factory
 │       ├── lstm_replay_buffer.py Episode buffer + sample_windows (Phase B)
 │       ├── policy.py             EpsilonGreedyPolicy
+│       ├── population.py         Multi-agent ecosystem layer (Individual, ecosystem_step, ...)
 │       ├── world_tick.py         Tick vật lý dùng chung
 │       ├── run_episode.py        Training loop 1 lifetime
-│       ├── visualize.py          Matplotlib GIF recorder
+│       ├── training_state.py     Persist epsilon/lifetimes_trained/best_metric qua các lần chạy
+│       ├── visualize.py          Matplotlib GIF recorder (single-agent + ecosystem)
 │       └── live_viewer.py        Pygame interactive 2D viewer
 ├── experiments/
-│   └── phase5_online_qlearning/
-│       └── run_experiment.py     Train + save + demo GIF + CSV, entry point chính
+│   └── run_experiment.py     Entry point chính: ecosystem training + checkpoint + GIF + CSV
 └── results/
-    ├── trained_brain_conv_lstm.pt
-    ├── phase6_multi_entity.csv
-    └── lifetime_demo_lstm.gif
+    ├── best_model.pt         Duy nhất 1 file weight, dùng chung bởi mọi entry point
+    ├── training_state.json   Epsilon + lifetimes + best_metric persist qua các lần chạy
+    ├── ecosystem_lifetime.gif
+    └── ecosystem_log.csv
 ```
-
-> Không còn thư mục `src/_legacy/` — các file NumPy Phase 1-5 cũ (`network.py`, `optimizer.py`,
-> `loss.py`, `activation.py`, `q_network.py`, `q_agent.py`, `frame_buffer.py`, `replay_buffer.py`,
-> `layer.py`, `lstm_cell.py`, `conv2d.py`, `lstm_agent.py`) đã bị xoá hẳn khỏi repo trong đợt
-> refactor torch này (không chỉ archive như đợt dọn dẹp trước).
 
 ---
 
@@ -402,22 +393,17 @@ trực tiếp được nữa.
 
 ---
 
-## Roadmap tiếp theo (đã cập nhật theo mục tiêu mới: simulation/behavior, không phải weight-learning)
+## Roadmap tiếp theo
 
-1. **CẤP BÁCH — fix lỗi torch refactor.** Cần traceback cụ thể từ Khanh. Không đoán mò kiến trúc
-   nữa; review tĩnh không thấy lỗi rõ ràng nên nhiều khả năng là runtime (shape mismatch lúc chạy,
-   thiếu package, lỗi Pygame trên máy có màn hình, hoặc lỗi trong vòng lặp windows rỗng khi buffer
-   chưa đủ episode).
-2. Train lại để có baseline torch/windowed-BPTT thật (thay bảng kết quả NumPy cũ ở trên).
-3. **Trọng tâm mới — quan sát & trực quan hoá behavior**, không phải chỉnh weight:
-   - Cải thiện `live_viewer.py` / GIF export để dễ "xem" một sinh vật sống một đời — có thể thêm
-     replay tua nhanh/chậm, so sánh hành vi giữa các giai đoạn train (đầu đời train vs cuối đời train).
-   - Cân nhắc thêm log hành vi định tính (không chỉ số liệu food/hazard) — VD heatmap vị trí, biểu
-     đồ hành động theo thời gian trong 1 lifetime — để "nhìn thấy" sự phát triển hành vi rõ hơn.
-4. Thế giới phong phú hơn (world lớn hơn, địa hình, có thể thêm ngày/đêm) — chỉ thêm khi phục vụ
-   trực tiếp mục tiêu "quan sát behavior" hoặc "làm game", không thêm vì "cho đủ phase" nữa.
-5. Multi-agent — cần refactor lớn (`World.step()` hiện chỉ nhận 1 agent/lần gọi). Ưu tiên thấp hơn
-   việc fix lỗi + có behavior quan sát được ổn định trước.
+1. Train lại để có baseline torch/windowed-BPTT thật với kiến trúc hiện tại (NUM_CELL_CLASSES=9,
+   food lifecycle, ecosystem) — bảng kết quả NumPy cũ bên dưới không còn so sánh được.
+2. **Quan sát & trực quan hoá behavior**, không phải chỉnh weight:
+   - Cải thiện `live_viewer.py` / GIF export để dễ "xem" — thêm replay tua nhanh/chậm, so sánh
+     hành vi đầu vs cuối training.
+   - Log hành vi định tính (heatmap vị trí, biểu đồ action distribution theo thời gian).
+3. Thế giới phong phú hơn (world lớn hơn, địa hình đa dạng hơn, ngày/đêm) — chỉ thêm khi phục
+   vụ trực tiếp mục tiêu "quan sát behavior" hoặc "làm game".
+4. Xóa `CHILD_INITIAL_EPSILON` khỏi config.py (không còn được dùng sau khi đổi sang `EPSILON_START`).
 6. Nếu mục tiêu game rõ hơn theo thời gian: cân nhắc tách phần "brain training" ra khỏi phần
    "world rendering/game loop" rõ ràng hơn nữa, để có thể đóng gói world như một sản phẩm xem/chơi
    độc lập với việc có đang train hay không.

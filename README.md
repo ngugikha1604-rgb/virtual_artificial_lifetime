@@ -166,9 +166,9 @@ What's still expected of an assistant working on this project:
 ## 6. Current architecture (high level — see `progress.md` for full detail)
 
 ```text
-World (2D grid: terrain layer [wall/water/soil/grass] + entities [food_low/food_high/hazard])
+World (2D grid: terrain layer [wall/water/soil/grass] + entities [food_low/food_high/food_starter/rotten_food/hazard])
    ↓ local view (NumPy)
-Observation encoder (NumPy: one-hot grid + body state)
+Observation encoder (NumPy: multi-hot grid + body state)
    ↓
 ConvLSTMDQN (PyTorch nn.Module: Conv2d+ReLU → LSTMCell → Linear)
    ↓
@@ -184,12 +184,13 @@ Episode replay buffer → windowed truncated-BPTT training (PyTorch autograd + A
 
 Entry points:
 
-- `experiments/phase5_online_qlearning/run_experiment.py` — train + save weights + render a demo
-  GIF + log CSV metrics, in one command.
+- `experiments/run_experiment.py` — multi-agent ecosystem training: runs the population simulation,
+  checkpoints the best individual to `results/best_model.pt`, renders `ecosystem_lifetime.gif`,
+  and logs `ecosystem_log.csv`, all in one command.
 - `src/rl/live_viewer.py` — interactive Pygame 2D viewer; can run with or without online training.
 - `src/rl/run_episode.py` — the training loop for a single lifetime, importable/reusable.
 
-Both entry points load from and save to the same single `results/best_model.pt` — there is
+All entry points load from and save to the same single `results/best_model.pt` — there is
 deliberately only ever one "the model" file, so training-by-command and watching-interactively are
 always looking at/building on the same brain, never two silently diverging copies.
 

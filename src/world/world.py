@@ -86,7 +86,7 @@ class World:
         "food_high":    {"code": 6, "category": "food", "respawns": False},
         "hazard":       {"code": 7, "category": "hazard"},
         # code intentionally == food_low's (see class docstring) — NOT a new
-        # one-hot channel, so NUM_CELL_CLASSES stays 8, not 9.
+        # channel, so NUM_CELL_CLASSES is NOT bumped for food_starter.
         "food_starter": {"code": 5, "category": "food", "respawns": False},
         # Rotten food: gets its OWN code/channel (8) so the network can
         # distinguish it from fresh food. Eating it applies a negative energy
