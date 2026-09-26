@@ -123,16 +123,45 @@ class World:
         self.entities = []  # list of {"type": str, "pos": (x, y)}
         self.seeds = {}     # {(x, y): ticks_remaining} — pending food growth, see _advance_food_growth
         self.food_ages = {} # {id(entity): ticks_at_current_stage} — food aging, see _advance_food_aging
+        # Computed ONCE here (not lazily inside spawn_point()) and cached in
+        # self._spawn_point — spawn_point() is called multiple times during
+        # __init__ (once by _init_terrain() to protect it from wall/water,
+        # once by _init_entities() to place food_starter in front of it) and
+        # they must all agree on the SAME cell; a spawn_point() that re-rolled
+        # randomly on every call would desync those two callers.
+        self._spawn_point = self._roll_spawn_point()
+        # Also reserved from ever receiving a food/hazard entity (see
+        # _random_free_cell / _random_free_cell_in_zone) — 2026-09: spawn is
+        # now random instead of a fixed, terrain-protected center cell, so
+        # "never wall" (guaranteed by protecting it from terrain carving,
+        # same as before) is no longer enough on its own to guarantee "never
+        # a hazard either" once entities are placed after it.
+        self._reserved_cells = {self._spawn_point[0]}
         self._init_terrain()   # BEFORE entities: entity spawn avoids wall cells
         self._init_entities()
 
+    def _roll_spawn_point(self):
+        """Pick a uniformly random in-bounds cell + random facing for a new
+        world's spawn point (2026-09: Khanh wants spawn randomized, was
+        always dead-center facing up before). Called once from __init__,
+        BEFORE any terrain is carved — so "not wall" is guaranteed the same
+        way it always was (see _init_terrain: whatever cell is picked here
+        gets passed through as a protected cell that wall/water carving must
+        skip), and "not hazard" is guaranteed by self._reserved_cells (see
+        __init__) keeping every entity-placement helper away from it."""
+        pos    = (np.random.randint(0, self.width), np.random.randint(0, self.height))
+        facing = np.random.randint(0, 4)
+        return pos, int(facing)
+
     def spawn_point(self):
-        """Where a newly-created Agent starts: world center, facing "up" (0).
-        Single source of truth used by both World (terrain generation keeps
-        this cell + the cell directly in front of it clear of wall/water, and
-        food_starter is placed exactly in front of it) and Agent.__init__ —
-        so the two can never silently drift apart."""
-        return (self.width // 2, self.height // 2), 0
+        """Where a newly-created Agent starts — a random in-bounds cell (never
+        wall, never hazard; see _roll_spawn_point/_reserved_cells), rolled
+        ONCE per World and cached, not re-rolled per call. Single source of
+        truth used by both World (terrain generation keeps this cell + the
+        cell directly in front of it clear of wall/water, and food_starter is
+        placed exactly in front of it) and Agent.__init__ — so the two can
+        never silently drift apart."""
+        return self._spawn_point
 
     @property
     def frame_size(self):
@@ -215,8 +244,10 @@ class World:
     def _random_free_cell_in_zone(self, zone_col, zone_row, avoid=None):
         """Pick a random free cell inside the given zone. Falls back to any
         free cell in the zone; if the entire zone is occupied, falls back to
-        the global _random_free_cell."""
-        occupied = {e["pos"] for e in self.entities}
+        the global _random_free_cell. Never returns a cell in
+        self._reserved_cells (currently just the agent's spawn point — see
+        __init__/_roll_spawn_point) regardless of `avoid`."""
+        occupied = {e["pos"] for e in self.entities} | self._reserved_cells
         if avoid is not None:
             occupied.add(avoid)
         candidates = [c for c in self._cells_in_zone(zone_col, zone_row)
@@ -228,7 +259,7 @@ class World:
         return self._random_free_cell(avoid=avoid)
 
     def _random_free_cell(self, avoid=None):
-        occupied = {e["pos"] for e in self.entities}
+        occupied = {e["pos"] for e in self.entities} | self._reserved_cells
         if avoid is not None:
             occupied.add(avoid)
         while True:

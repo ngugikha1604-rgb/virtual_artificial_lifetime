@@ -128,12 +128,19 @@ def mutate_weights(net):
     return child_net
 
 
-def reproduce(parent, world, current_population_size):
+def reproduce(parent, world, current_population_size, child_epsilon=None):
     """Try to spawn a mutated child of `parent`. Returns the new Individual,
     or None if there's no room under MAX_POPULATION or no free cell exists
     next to the parent (in which case the parent's energy is left untouched
     — REPRODUCTION_ENERGY_COST is only paid on an actual birth, not a failed
-    attempt, so a crowded world doesn't quietly starve a would-be parent)."""
+    attempt, so a crowded world doesn't quietly starve a would-be parent).
+
+    `child_epsilon`: starting epsilon for the child. Defaults to
+    config.EPSILON_START (full re-explore per generation — Khanh's original
+    ecosystem design choice, see progress.md). live_viewer.py passes
+    config.LIVE_VIEWER_START_EPSILON here instead (viewer-only override —
+    see that constant's comment in config.py); run_experiment.py doesn't
+    pass this, so real training is completely unaffected."""
     if current_population_size >= config.MAX_POPULATION:
         return None
     cell = world.random_adjacent_cell(parent.agent.position)
@@ -142,12 +149,14 @@ def reproduce(parent, world, current_population_size):
 
     parent.agent.energy -= config.REPRODUCTION_ENERGY_COST
     child_net = mutate_weights(parent.brain.net)
-    return Individual(world, child_net, config.EPSILON_START,
+    epsilon = child_epsilon if child_epsilon is not None else config.EPSILON_START
+    return Individual(world, child_net, epsilon,
                       generation=parent.generation + 1, parent_id=parent.id,
                       position=cell, facing=parent.agent.facing)
 
 
-def ecosystem_step(world, population, auto_reseed=True):
+def ecosystem_step(world, population, auto_reseed=True, child_epsilon=None,
+                   tick_count=None):
     """
     Advance the whole ecosystem by ONE tick: every living individual acts
     once (world_tick — the exact same function run_episode.py uses for a
@@ -175,6 +184,18 @@ def ecosystem_step(world, population, auto_reseed=True):
     moment is wanted) to instead leave `population` empty.
 
     Returns (births: list[Individual], deaths: list[Individual]) for logging.
+
+    `child_epsilon` (default None): passed through to reproduce() for any
+    child born this tick; None keeps the original config.EPSILON_START
+    default (used by run_experiment.py). live_viewer.py passes
+    config.LIVE_VIEWER_START_EPSILON instead — a viewer-only override, see
+    that constant's comment in config.py.
+
+    `tick_count` (default None): the caller's current global tick counter.
+    When provided and config.LOG_LEARN_EVERY > 0, a one-line learn-stats
+    summary is printed every LOG_LEARN_EVERY ticks — loss trend, Q-value
+    range, gradient norm, and number of active learners. Pass None (the
+    default) to suppress all learn logging with zero overhead.
     """
     order = list(population)
     np.random.shuffle(order)
@@ -199,10 +220,12 @@ def ecosystem_step(world, population, auto_reseed=True):
         reward = compute_reward(result.event, result.prev_pos, result.prev_facing,
                                 ind.agent.position, world, starved=result.starved,
                                 done=result.done, age=ind.agent.age,
-                                survived_full_life=(result.done and ind.agent.health > 0))
+                                survived_full_life=(result.done and ind.agent.health > 0),
+                                energy=ind.agent.energy, health=ind.agent.health)
 
         if not result.done and ind.agent.energy >= config.ENERGY_TO_REPRODUCE:
-            child = reproduce(ind, world, len(population) + len(births))
+            child = reproduce(ind, world, len(population) + len(births),
+                              child_epsilon=child_epsilon)
             if child is not None:
                 births.append(child)
                 reward += config.REPRODUCE_BONUS
@@ -222,8 +245,16 @@ def ecosystem_step(world, population, auto_reseed=True):
             if window:
                 ind.brain.learn_windows([window])
 
+        # Within-lifetime decay (2026-09, see config.INLIFE_EPSILON_DECAY):
+        # every tick, not just once at death — makes the exploration rate
+        # actually fall over the course of THIS individual's own life,
+        # instead of only mattering to whichever future individual happens
+        # to load a decayed value later. Applies unconditionally (whether or
+        # not this tick ends the individual's life); harmless on a death
+        # tick since the Individual is discarded right after anyway.
+        ind.brain.policy.decay(rate=config.INLIFE_EPSILON_DECAY)
+
         if result.done:
-            ind.brain.policy.decay()
             deaths.append(ind)
 
     for d in deaths:
@@ -233,7 +264,38 @@ def ecosystem_step(world, population, auto_reseed=True):
     if not population and auto_reseed:
         population.append(spawn_founder(world))
 
+    # ── Periodic learn-stats log ──────────────────────────────────────────
+    # Drain stats from every living individual's brain once per
+    # LOG_LEARN_EVERY ticks.  Each brain's drain_learn_stats() returns the
+    # aggregated stats since the LAST drain (or since construction), so the
+    # window is always exactly the last LOG_LEARN_EVERY ticks — never stale.
+    # We aggregate across individuals by a simple mean so the log represents
+    # "the typical brain in the population", not any one individual.
+    if (tick_count is not None
+            and config.LOG_LEARN_EVERY > 0
+            and tick_count > 0
+            and tick_count % config.LOG_LEARN_EVERY == 0):
+        all_stats = [ind.brain.drain_learn_stats() for ind in population]
+        all_stats = [s for s in all_stats if s is not None]  # skip brains with no learn yet
+        if all_stats:
+            n_learners   = len(all_stats)
+            total_calls  = sum(s["n"] for s in all_stats)
+            mean_loss    = sum(s["loss_mean"] for s in all_stats) / n_learners
+            last_loss    = sum(s["loss_last"] for s in all_stats) / n_learners
+            q_min        = min(s["q_min"]     for s in all_stats)
+            q_max        = max(s["q_max"]     for s in all_stats)
+            grad_norm    = sum(s["grad_norm"] for s in all_stats) / n_learners
+            tgt_syncs    = sum(s["target_syncs"] for s in all_stats)
+            print(
+                f"[learn] tick={tick_count:>6}  pop={len(population):>3}  "
+                f"learners={n_learners}  calls={total_calls}  "
+                f"loss_mean={mean_loss:.4f}  loss_last={last_loss:.4f}  "
+                f"Q=[{q_min:+.2f}, {q_max:+.2f}]  "
+                f"grad={grad_norm:.3f}  tgt_syncs={tgt_syncs}"
+            )
+
     return births, deaths
+
 
 
 def check_and_save_best(candidates, best_metric_so_far, net_path, state_path):

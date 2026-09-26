@@ -48,6 +48,16 @@ class TorchQAgent:
         self.target_sync_every = target_sync_every
         self._learn_calls = 0
 
+        # ── Learn-stats accumulators (drained by drain_learn_stats()) ─────────
+        # Lightweight lists appended on each learn_windows() call.  drain_*()
+        # reads aggregates and clears them so the interval is always "since last
+        # drain", not since construction.  All lists reset together to keep the
+        # sample count consistent.
+        self._stat_losses: list[float] = []
+        self._stat_q_mins: list[float] = []
+        self._stat_q_maxs: list[float] = []
+        self._stat_grad_norms: list[float] = []
+
     # ── conversion helpers ────────────────────────────────────────────────
     def _t(self, a):
         """NumPy array -> torch float32 vector on device, batch dim added."""
@@ -173,10 +183,77 @@ class TorchQAgent:
         self.optimizer.zero_grad()
         loss = F.mse_loss(qq, tt)
         loss.backward()
+
+        # Gradient norm (total L2 over all parameter gradients) — a single
+        # scalar that makes it immediately obvious when grads are exploding
+        # (>>10) or vanishing (<<1e-4) without having to inspect per-layer.
+        # Computed BEFORE optimizer.step() so the value reflects the gradient
+        # actually used for this update.
+        grad_norm = float(
+            torch.sqrt(sum(p.grad.data.norm(2) ** 2
+                           for p in self.net.parameters()
+                           if p.grad is not None)).item()
+        )
+
         self.optimizer.step()
 
         self._learn_calls += 1
         if self._learn_calls % self.target_sync_every == 0:
             self.target_net.load_state_dict(self.net.state_dict())
 
-        return float(loss.item())
+        # Record stats for drain_learn_stats() — no branching needed here,
+        # lists stay short (≤ LOG_LEARN_EVERY / LEARN_EVERY entries each
+        # interval) so memory cost is negligible.
+        loss_val = float(loss.item())
+        with torch.no_grad():
+            q_min = float(qq.min().item())
+            q_max = float(qq.max().item())
+        self._stat_losses.append(loss_val)
+        self._stat_q_mins.append(q_min)
+        self._stat_q_maxs.append(q_max)
+        self._stat_grad_norms.append(grad_norm)
+
+        return loss_val
+
+    def drain_learn_stats(self):
+        """Return a summary dict of learning statistics accumulated since the
+        last call (or since construction) and reset all accumulators.
+
+        Returns None if no learn steps happened in the interval (e.g. buffer
+        still warming up).  Otherwise returns:
+
+            {
+              "n"          : int,    # number of learn_windows() calls in interval
+              "loss_mean"  : float,  # mean MSE loss across those calls
+              "loss_last"  : float,  # most recent loss (trend indicator)
+              "q_min"      : float,  # global Q-value min across all targets
+              "q_max"      : float,  # global Q-value max across all targets
+              "grad_norm"  : float,  # mean gradient L2 norm across calls
+              "target_syncs": int,   # how many target-net syncs happened
+            }
+
+        Callers (ecosystem_step / run_episode) use this for a periodic one-line
+        log that shows whether loss is decreasing, Q-values are stable, and
+        gradients are in a healthy range.
+        """
+        n = len(self._stat_losses)
+        if n == 0:
+            return None
+
+        stats = {
+            "n"           : n,
+            "loss_mean"   : sum(self._stat_losses) / n,
+            "loss_last"   : self._stat_losses[-1],
+            "q_min"       : min(self._stat_q_mins),
+            "q_max"       : max(self._stat_q_maxs),
+            "grad_norm"   : sum(self._stat_grad_norms) / n,
+            "target_syncs": self._learn_calls // self.target_sync_every,
+        }
+        # Reset accumulators atomically (all-or-nothing, so a future drain
+        # never sees a mix of old and new data).
+        self._stat_losses.clear()
+        self._stat_q_mins.clear()
+        self._stat_q_maxs.clear()
+        self._stat_grad_norms.clear()
+        return stats
+

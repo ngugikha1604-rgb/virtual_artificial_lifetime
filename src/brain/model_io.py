@@ -18,6 +18,39 @@ import torch
 from pathlib import Path
 
 
+def load_weights_or_fresh(build_net_fn, file_path, verbose=True):
+    """Try to load `file_path` into a freshly-built net; the "resume if
+    possible, else start fresh" pattern every entry point needs
+    (run_experiment.py, pretrain_single_agent.py, live_viewer.py all used to
+    duplicate this same ~10-line try/except by hand — centralised here
+    2026-09 after a senior-style codebase review flagged it).
+
+    `build_net_fn`: zero-arg callable returning a fresh net (e.g.
+    lstm_q_network.build_lstm_network) — taken as a parameter rather than
+    imported directly so this brain-layer module doesn't need to depend on
+    the RL-layer's network factory.
+
+    Returns (net, weights_loaded: bool). weights_loaded is False both when
+    `file_path` doesn't exist yet AND when it exists but is incompatible
+    (load_lstm_weights raised ValueError — architecture changed) — either
+    way the returned net is a fresh one from build_net_fn(), never a
+    partially-loaded one.
+    """
+    net = build_net_fn()
+    if not Path(file_path).exists():
+        if verbose:
+            print(f"[weights] No saved weights found at {file_path} — starting fresh.")
+        return net, False
+    try:
+        load_lstm_weights(net, file_path)
+        return net, True
+    except ValueError as e:
+        if verbose:
+            print(f"[weights] {e}")
+            print("[weights] Re-initialising a fresh random-weight brain.")
+        return build_net_fn(), False
+
+
 def save_lstm_weights(net, file_path):
     """Save the full parameter dict of the net to file_path (.pt)."""
     Path(file_path).parent.mkdir(parents=True, exist_ok=True)

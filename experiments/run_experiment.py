@@ -65,14 +65,14 @@ for _dir in (RL_DIR, WORLD_DIR, BRAIN_DIR, SRC_DIR):
 
 from world import World
 from lstm_q_network import build_lstm_network
-from model_io import load_lstm_weights
+from model_io import load_weights_or_fresh
 from training_state import load_training_state
 from population import spawn_founder, ecosystem_step, check_and_save_best
 from visualize import ecosystem_snapshot, save_ecosystem_gif
 from config import (WORLD_SIZE, NUM_FOOD_LOW, NUM_FOOD_HIGH, NUM_HAZARDS, SEED,
                     INITIAL_POPULATION, EPSILON_START, NUM_ECOSYSTEM_TICKS,
                     ECOSYSTEM_SNAPSHOT_EVERY, ECOSYSTEM_LOG_EVERY, ECOSYSTEM_GIF_FPS,
-                    SAVE_EVERY)
+                    ECOSYSTEM_SAVE_EVERY_TICKS)
 
 # ONE model file, shared by every driver (this script, live_viewer.py).
 WEIGHTS_PATH = RESULTS_DIR / "best_model.pt"
@@ -91,20 +91,10 @@ def run_experiment(num_ticks, reset_epsilon=False):
                   num_hazards=NUM_HAZARDS)
 
     # Load existing weights to found the population from, if available.
-    base_net = build_lstm_network()
-    weights_exist = WEIGHTS_PATH.exists()
+    base_net, weights_exist = load_weights_or_fresh(build_lstm_network, WEIGHTS_PATH)
     if weights_exist:
-        try:
-            print(f"[weights] Found existing weights at {WEIGHTS_PATH} — founding "
-                  f"the population from them.")
-            load_lstm_weights(base_net, WEIGHTS_PATH)
-        except ValueError as e:
-            print(f"[weights] {e}")
-            print("[weights] Re-initialising fresh random-weight founder(s).")
-            base_net = build_lstm_network()
-            weights_exist = False
-    else:
-        print("[weights] No saved weights found — starting from fresh random founder(s).")
+        print(f"[weights] Found existing weights at {WEIGHTS_PATH} — founding "
+              f"the population from them.")
 
     state = load_training_state(STATE_PATH)
     if reset_epsilon:
@@ -144,7 +134,8 @@ def run_experiment(num_ticks, reset_epsilon=False):
     max_generation_ever = 0
 
     for tick in range(1, num_ticks + 1):
-        births, deaths = ecosystem_step(world, population, auto_reseed=True)
+        births, deaths = ecosystem_step(world, population, auto_reseed=True,
+                                        tick_count=tick)
         total_births += len(births)
         total_deaths += len(deaths)
         if population:
@@ -153,7 +144,7 @@ def run_experiment(num_ticks, reset_epsilon=False):
 
         best_metric_so_far = check_and_save_best(deaths, best_metric_so_far,
                                                   WEIGHTS_PATH, STATE_PATH)
-        if tick % SAVE_EVERY == 0:
+        if tick % ECOSYSTEM_SAVE_EVERY_TICKS == 0:
             best_metric_so_far = check_and_save_best(population, best_metric_so_far,
                                                       WEIGHTS_PATH, STATE_PATH)
 

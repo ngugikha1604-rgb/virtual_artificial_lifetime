@@ -187,7 +187,20 @@ Entry points:
 - `experiments/run_experiment.py` — multi-agent ecosystem training: runs the population simulation,
   checkpoints the best individual to `results/best_model.pt`, renders `ecosystem_lifetime.gif`,
   and logs `ecosystem_log.csv`, all in one command.
-- `src/rl/live_viewer.py` — interactive Pygame 2D viewer; can run with or without online training.
+- `experiments/pretrain_single_agent.py` — optional foundation-building step, run BEFORE
+  `run_experiment.py` (not instead of it): trains a single persistent brain across many lifetimes
+  using the original, richer single-agent learning signal (8 diverse windows sampled from a pool
+  of past completed lifetimes, vs. the ecosystem's 1 window from the individual's own in-progress
+  life). Reads/writes the same `results/best_model.pt`/`training_state.json`, so
+  `run_experiment.py`/`live_viewer.py` automatically continue from whatever it produces.
+- `tests/` — `pytest` regression tests for invariants that used to only be checked by hand in a
+  sandbox (spawn point never on wall/hazard, zone food coverage, epsilon decay, checkpoint
+  save/load round-trips and shape-mismatch fallback). Run with `pip install pytest && pytest tests/`.
+- `src/rl/live_viewer.py` — interactive Pygame 2D viewer for the live ecosystem; runs a much
+  bigger world (50×50) than training uses (10×10), at a slower default pace, meant to be
+  watched continuously rather than used for quick training debugging. Still loads from and
+  saves to the same `results/best_model.pt`/`training_state.json` as training — it's one more
+  source of training, not a sandboxed demo.
 - `src/rl/run_episode.py` — the training loop for a single lifetime, importable/reusable.
 
 All entry points load from and save to the same single `results/best_model.pt` — there is

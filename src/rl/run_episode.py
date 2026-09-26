@@ -19,6 +19,7 @@ from config import (WORLD_SIZE, NUM_FOOD_LOW, NUM_FOOD_HIGH, NUM_HAZARDS, MAX_AG
                     SURVIVAL_BONUS, FOOD_BONUS, HAZARD_PENALTY, STARVATION_PENALTY,
                     SHAPE_WEIGHT_FOOD, SHAPE_WEIGHT_HAZARD,
                     AGE_BONUS_PER_TICK, MAX_AGE_SURVIVAL_BONUS,
+                    MAX_ENERGY, MAX_HEALTH,
                     BATCH_SIZE, WINDOW_N, MIN_EPISODES, LEARN_EVERY)
 
 
@@ -35,14 +36,31 @@ def _nearest_dist_delta(prev_pos, new_pos, positions):
 
 
 def compute_reward(event, prev_pos, prev_facing, new_pos, world, starved=False,
-                    done=False, age=0, survived_full_life=False):
+                    done=False, age=0, survived_full_life=False,
+                    energy=MAX_ENERGY, health=MAX_HEALTH):
     """
-    reward = survival bonus
+    reward = wellbeing bonus (energy/health, continuous — see below)
            + food bonus (on eat) OR food-attraction shaping
            + hazard-avoidance shaping (always active)
            - flat hazard penalty (every tick standing on a hazard cell)
            - flat starvation penalty (every tick starvation damage is applied)
            + [only on the tick the episode ends] age bonus + completion bonus
+
+    `energy`/`health` should be the agent's CURRENT (post-tick) values — used
+    to scale SURVIVAL_BONUS continuously (see config.py's SURVIVAL_BONUS
+    comment for the full rationale): reward_wellbeing = SURVIVAL_BONUS *
+    (energy/MAX_ENERGY) * (health/MAX_HEALTH). This replaced a flat per-tick
+    constant that (a) gave no training signal for managing energy/health, and
+    (b) — the reason for this change — made check_and_save_best's fitness
+    (total_reward) collapse to near-identical values across the population
+    once the ecosystem reliably produces individuals that survive to MAX_AGE,
+    since the only other large, once-per-lifetime component (age bonus below)
+    is then IDENTICAL for all of them. A continuous, state-dependent per-tick
+    signal instead scales with HOW WELL an individual actually kept itself
+    fed and healthy over its whole life, not just whether it technically
+    survived — the intended proxy for "model giỏi nhất", not "sống dai nhất".
+    Defaults to full energy/health (i.e. behaves like the old flat bonus) so
+    any caller that doesn't pass them explicitly still works.
 
     Both shapings are potential-based (Ng et al. 1999) — additive-safe under
     full observability. This world is a POMDP (the agent only ever sees its
@@ -69,7 +87,9 @@ def compute_reward(event, prev_pos, prev_facing, new_pos, world, starved=False,
     episode ended by reaching MAX_AGE with health still > 0 (old age, not a
     hazard/starvation death).
     """
-    reward   = SURVIVAL_BONUS
+    energy_frac = max(0.0, min(1.0, energy / MAX_ENERGY))
+    health_frac = max(0.0, min(1.0, health / MAX_HEALTH))
+    reward   = SURVIVAL_BONUS * energy_frac * health_frac
     max_dist = world.width + world.height - 2
 
     if event is not None and event["category"] == "food":
@@ -160,7 +180,8 @@ def run_episode(world, agent, brain, replay, train=True, render=False, record=Fa
         reward = compute_reward(result.event, result.prev_pos, result.prev_facing,
                                 agent.position, world, starved=result.starved,
                                 done=result.done, age=agent.age,
-                                survived_full_life=(result.done and agent.health > 0))
+                                survived_full_life=(result.done and agent.health > 0),
+                                energy=agent.energy, health=agent.health)
         # Phase B: store the tick in the current EPISODE with its pre-tick
         # hidden (h,c) as the anchor so a later window can unroll from it.
         # Use result.x_used (the observation actually fed to the brain) for

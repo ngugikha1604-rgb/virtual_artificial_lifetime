@@ -159,8 +159,19 @@ FOOD_AGE_STAGE_TICKS = 5    # ticks each stage lasts before advancing
 # weights (model_io refuses the shape mismatch and falls back to a fresh net).
 VISION_RANGE   = 4        # how many cells ahead the agent can see (was 2)
 VISION_WIDTH   = 4        # column width of the vision cone
-BEHIND_ROWS    = 2        # rows behind the agent (kept unknown-ish constant)
-VIEW_H         = VISION_RANGE + BEHIND_ROWS   # observation grid rows  (2+4 = 6)
+BEHIND_ROWS    = 0        # rows behind the agent — 0: agent only sees forward
+                          # (was 2 before 2026-09: those 2 rows were always
+                          # CELL_UNKNOWN=0, never containing real information,
+                          # but still wasted 80 input dimensions and made the
+                          # conv + obs vector larger than needed. Set to 0 to
+                          # match the intended "human-like forward-only vision"
+                          # design; all code in world.py/world_tick.py/
+                          # lstm_q_network.py reads world.behind_rows at
+                          # runtime so no other file needs changing. NOTE:
+                          # changing this invalidates best_model.pt — the
+                          # saved weights have a different shape and model_io
+                          # will fall back to a fresh random brain.)
+VIEW_H         = VISION_RANGE + BEHIND_ROWS   # observation grid rows  (= 4)
 VIEW_W         = VISION_WIDTH                 # observation grid columns (4)
 
 # ── RL / network hyper-parameters ─────────────────────────────────────────────
@@ -237,13 +248,45 @@ LEARN_EVERY     = 4             # learn every N ticks of the live episode
 # online net without lagging for an entire long run.
 TARGET_SYNC_EVERY = 200
 
-EPSILON_START   = 1.0
+# How often (in ecosystem ticks, NOT learn-call count) the ecosystem prints a
+# one-line learn-stats summary to stdout — loss, Q-range, gradient norm, number
+# of learn calls in the interval.  Set to 0 to silence all learn logging.
+# At LEARN_EVERY=4 one ecosystem tick fires a learn call every 4 ticks, so
+# LOG_LEARN_EVERY=200 means a log line every ~50 learn calls — visible in a
+# terminal at 2 fps but not flooding faster than you can read it.
+LOG_LEARN_EVERY = 200
+
+EPSILON_START   = 0.5
 # A permanent 15% exploit noise (the old default) meant the agent never behaved
-# near-greedily late in training — one in ~7 actions stayed random forever. 0.05
-# is a standard exploration floor: still enough to escape local optima / loops,
-# low enough that the final policy is mostly exploitative after epsilon decays.
-EPSILON_MIN     = 0.05
+# near-greedily late in training — one in ~7 actions stayed random forever.
+# 0.03 is a standard exploration floor: still enough to escape local optima /
+# loops, low enough that the final policy is mostly exploitative after epsilon
+# decays.
+EPSILON_MIN     = 0.03
 EPSILON_DECAY   = 0.9995  # per-lifetime decay; hits eps_min late in a 4000-lt run
+
+# Within-lifetime decay (2026-09) — a SEPARATE, much faster decay rate than
+# EPSILON_DECAY above, applied every TICK during an individual's own life
+# (population.py's ecosystem_step), not once between lifetimes. Discovered
+# during a stability audit: EPSILON_DECAY/policy.decay() was only ever called
+# once, right as an individual dies — a no-op for that individual's OWN
+# behavior (it's discarded immediately after) — so no individual, founder or
+# child, ever actually became less random over the course of its own life;
+# every ecosystem individual acted at a constant exploration rate for its
+# entire lifetime. Khanh wants an individual to progressively rely less on
+# random exploration and more on what it's actually learned as its own life
+# goes on, not just across separate lifetimes.
+# Tuned (2026-09, second pass) so EPSILON_START=0.5 decays to EPSILON_MIN=0.03
+# by roughly tick 100 (0.97**100 ~= 0.0476, close enough) — the FIRST version
+# of this (rate 0.985) only reached the floor by ~tick 186, but a separate
+# comment elsewhere in this file (TARGET_SYNC_EVERY) estimates a typical
+# lifetime at only ~150-250 ticks, meaning many individuals were dying before
+# ever reaching a real "exploit" phase — the whole point of this mechanism.
+# 0.97 leaves at least half of even a short (~200-tick) life mostly greedy.
+# Applies to BOTH live_viewer.py AND run_experiment.py (population.py is
+# shared code, not viewer-only) — unlike LIVE_VIEWER_START_EPSILON below,
+# which Khanh wants viewer-only.
+INLIFE_EPSILON_DECAY = 0.97
 
 # ── Agent body mechanics ──────────────────────────────────────────────────────
 MAX_ENERGY      = 100.0
@@ -274,20 +317,55 @@ ACTION_DURATION   = {0: 1, 1: 3, 2: 3, 3: 1, 4: 1}
 # placeholders).
 #
 # Why these numbers:
-#  - SURVIVAL_BONUS 0.001 (was 0.01): a *constant* per-tick positive paid for
-#    every state, including idling, biases every Q-value upward uniformly and
-#    adds a noise floor that can exceed a single shaping step (max ~0.01/tick
-#    with the old 0.05 weight over max_dist). Cut 10x so it no longer drowns
-#    the movement guidance while still gently favouring staying alive.
-#  - SHAPE_WEIGHT_* doubled: horizontal distance is normalized by max_dist, so
-#    each step's shaping contribution is small; potential-based shaping is what
-#    actually steers the agent toward food / away from hazard between the rare
-#    eat events. Weakening it relative to survival would let pure idle-noise
-#    dominate the online gradient. Raised to 0.1 (still well below an eat bonus)
-#    so it guides without overriding FOOD_BONUS / HAZARD_PENALTY.
+#  - SURVIVAL_BONUS (2026-09: changed from a flat per-tick constant to a
+#    continuous energy/health-based formula — was 0.001 paid identically every
+#    tick regardless of body state, which gave zero training signal for
+#    actually managing energy/health well vs. barely staying alive, and, once
+#    the ecosystem reliably produces individuals that live to MAX_AGE, left
+#    check_and_save_best's fitness (total_reward) collapsing to near-identical
+#    values across most of the population — the only large reward component
+#    left to discriminate them was the once-per-lifetime terminal bonus below,
+#    which is IDENTICAL (30.0) for every individual that survives the full
+#    lifespan. Now: reward_per_tick = SURVIVAL_BONUS * (energy/MAX_ENERGY) *
+#    (health/MAX_HEALTH) — see compute_reward() in run_episode.py. PRODUCT (not
+#    average) of the two fractions so an individual needs BOTH energy AND
+#    health healthy to earn the full bonus; letting either drop crashes this
+#    term toward 0 well before starvation/hazard damage actually kicks in, so
+#    it doubles as an early continuous warning gradient. Raised back to 0.01
+#    (was cut to 0.001 when it was flat noise — now that it's a genuine,
+#    state-dependent signal and the main differentiator among full-lifespan
+#    individuals, drowning it out would defeat the point of the change).
+#  - SHAPE_WEIGHT_* raised 0.10 -> 1.0 (2026-09, second pass): a stability
+#    audit found a "walks straight into a wall and just sits there" policy
+#    could still score 100+ purely from FOOD_BONUS (incidental eating) +
+#    REPRODUCE_BONUS + the terminal age bonus below — i.e. the ONLY
+#    component that actually rewards DIRECTED, purposeful foraging (moving
+#    toward food you can see / away from hazard you can see) was so small
+#    relative to those "passive" rewards that being smart barely paid better
+#    than being lucky. At WORLD_SIZE=10 (max_dist=18, what training actually
+#    runs at), 1.0 means a single well-directed step now contributes ~0.056 —
+#    still small per tick (so it can't override an actual FOOD_BONUS/eat
+#    event, still "guides" rather than dominates) but a sustained efficient
+#    approach now sums to something comparable to an eat bonus, instead of
+#    being lost in noise. NOTE: this is normalized by max_dist = width+height-2,
+#    which is world-size-dependent — live_viewer.py's much bigger 50x50
+#    viewer world (max_dist=98) dilutes this ~5.4x more than the 10x10
+#    training world; tuned for the world training ACTUALLY happens in, not
+#    the viewer's, since the viewer is for watching the trained brain, not
+#    itself the thing being optimized for.
 #  - FOOD_BONUS / HAZARD_PENALTY unchanged: these are event-level (eat 3/5,
 #    hazard -1) and dominate whenever an interaction happens, as intended.
-SURVIVAL_BONUS      = 0.001
+#  - REPRODUCE_BONUS lowered 4.0 -> 1.0 (2026-09, second pass): reproduction
+#    is fully automatic (fires whenever energy >= ENERGY_TO_REPRODUCE, no
+#    "decision" the network makes), so rewarding it at a FOOD_HIGH-comparable
+#    magnitude meant an individual that merely survives long enough to get
+#    well-fed collects a large, skill-independent reward simply for existing
+#    near abundant food — exactly the "lucky, not smart" inflation the audit
+#    found. Lowered to a token nudge (comparable to HAZARD_PENALTY) — still
+#    gives backprop SOME direct signal toward reproductive fitness (the
+#    original intent), just no longer large enough to dominate total_reward
+#    on its own.
+SURVIVAL_BONUS      = 0.01
 FOOD_BONUS          = {"food_low": 3.00, "food_high": 5.00, "food_starter": 3.00,
                        "rotten_food": -1.50}   # eating rotten hurts
 HAZARD_PENALTY      = 1.00
@@ -301,8 +379,8 @@ HAZARD_PENALTY      = 1.00
 # right now" events of comparable severity — re-tune independently once you
 # have baseline data on how often each actually triggers.
 STARVATION_PENALTY  = 1.00
-SHAPE_WEIGHT_FOOD   = 0.10
-SHAPE_WEIGHT_HAZARD = 0.10
+SHAPE_WEIGHT_FOOD   = 1.0
+SHAPE_WEIGHT_HAZARD = 1.0
 
 # Terminal (once-per-lifetime) reward, paid on the tick the episode ends,
 # regardless of cause — previously the ONLY signal tied to "how long did you
@@ -311,15 +389,19 @@ SHAPE_WEIGHT_HAZARD = 0.10
 # FOOD_BONUS (3-5) or HAZARD_PENALTY (1). This makes surviving longer a much
 # more explicit, comparable-scale signal instead of an easily-drowned-out one.
 #   AGE_BONUS_PER_TICK: paid ONCE at episode end, proportional to the final
-#     age reached (not accumulated every tick like SURVIVAL_BONUS) — 0.05 so
-#     a lifetime of ~200 ticks earns ~10 (a couple of FOOD_BONUS-eats' worth),
-#     and a full ~400-tick run earns ~20.
+#     age reached (not accumulated every tick like SURVIVAL_BONUS) — 0.025
+#     (2026-09, halved from 0.05: a full ~400-tick life used to earn a flat
+#     20 here regardless of HOW that life was spent, dwarfing the shaping
+#     signal above even after raising it; a full life is now worth ~10, still
+#     a meaningful "you survived" signal, just no longer big enough to make
+#     mere longevity out-earn directed foraging skill on its own).
 #   MAX_AGE_SURVIVAL_BONUS: an ADDITIONAL flat bonus, paid only if the episode
 #     ended by reaching MAX_AGE with health still > 0 (i.e. old age, not a
 #     hazard/starvation death) — a clear "completed a full life" signal,
 #     distinct from merely having racked up a lot of ticks before dying.
-AGE_BONUS_PER_TICK      = 0.05
-MAX_AGE_SURVIVAL_BONUS  = 10.0
+#     Halved 10.0 -> 5.0 alongside AGE_BONUS_PER_TICK for the same reason.
+AGE_BONUS_PER_TICK      = 0.025
+MAX_AGE_SURVIVAL_BONUS  = 5.0
 
 # ── Reproduction / ecosystem (2026-09) ───────────────────────────────
 # Hybrid nature+nurture (Khanh's choice over pure forward-only evolution):
@@ -343,11 +425,14 @@ REPRODUCTION_ENERGY_COST = 40.0   # deducted from parent on an actual birth; the
                                   # ONLY throttle on how often one individual can
                                   # reproduce (energy must climb back above the
                                   # threshold again — no separate cooldown timer)
-REPRODUCE_BONUS          = 4.0    # reward bonus for the PARENT the tick it
-                                  # reproduces (comparable to eating food_high) —
-                                  # gives backprop a direct incentive to reach
-                                  # reproductive fitness, not just relying on
-                                  # cross-generation selection to notice it works
+REPRODUCE_BONUS          = 1.0    # reward bonus for the PARENT the tick it
+                                  # reproduces (2026-09: lowered from 4.0 —
+                                  # see the "Reward shaping" section above for
+                                  # why; still a token direct incentive for
+                                  # backprop, just no longer large enough to
+                                  # dominate total_reward on its own since
+                                  # reproduction itself requires no skill,
+                                  # only enough energy)
 MUTATION_STD             = 0.05   # std of Gaussian noise added to EVERY weight
                                   # of a COPY of the parent's network ("biến dị
                                   # gen") — small relative to typical Conv2d/
@@ -358,12 +443,11 @@ MAX_POPULATION            = 12    # hard cap on simultaneous living individuals 
                                   # networks means N forward passes/tick, so this
                                   # also directly bounds per-tick compute cost
 INITIAL_POPULATION        = 1     # how many founder individuals start a run
-CHILD_INITIAL_EPSILON     = 0.3   # child's exploration starts here, not
-                                  # EPSILON_START=1.0 — it inherits reasonable
-                                  # starting behavior from its parent's weights,
-                                  # so re-exploring from total randomness would
-                                  # waste that; matches the "resuming training"
-                                  # default (0.3) used elsewhere in the project
+# CHILD_INITIAL_EPSILON removed (2026-09 audit): was superseded when Khanh
+# decided children should start at EPSILON_START=1.0 instead (full re-explore
+# per generation — see progress.md item 10), leaving this constant unused by
+# any code (reproduce() in population.py passes config.EPSILON_START, not
+# this). Already flagged as safe-to-delete in progress.md's own roadmap.
 
 # ── Checkpointing (best-model tracking + periodic saves) ─────────────────────
 # Training used to save weights ONLY once, after the entire run finished:
@@ -375,17 +459,30 @@ CHILD_INITIAL_EPSILON     = 0.3   # child's exploration starts here, not
 # is no held-out validation set, just "whatever happened most recently"). Now,
 # every SAVE_EVERY lifetimes OR whenever the ROLLING MEAN total_reward over the
 # last BEST_METRIC_WINDOW lifetimes beats the best ever seen, results/best_model.pt
-# is re-saved (see run_experiment.py / training_state.py) — there is only ONE
-# model file (shared by run_experiment.py and live_viewer.py, see
-# run_experiment.py's module docstring for why), so this protects against
-# losing an interrupted run's progress but, unlike an earlier design with a
-# separate best-only file, does NOT protect against a later save overwriting
-# it with weights that turn out worse.
-SAVE_EVERY          = 200   # lifetimes between periodic checkpoint saves (see below)
+# is re-saved (see pretrain_single_agent.py / training_state.py) — there is only
+# ONE model file (shared by every entry point, see run_experiment.py's module
+# docstring for why), so this protects against losing an interrupted run's
+# progress but, unlike an earlier design with a separate best-only file, does
+# NOT protect against a later save overwriting it with weights that turn out
+# worse.
+SAVE_EVERY          = 200   # LIFETIMES between periodic checkpoint saves — used by
+                            # pretrain_single_agent.py's single-persistent-brain
+                            # loop, where "lifetime" is the natural unit of
+                            # progress (one full episode of the one brain being
+                            # trained).
+# The ecosystem (run_experiment.py / live_viewer.py) has no single equivalent
+# "lifetime" to count between saves — many individuals live and die
+# concurrently — so its periodic safety-net save is measured in ECOSYSTEM
+# TICKS instead. 2026-09: this used to just reuse SAVE_EVERY (both happened to
+# be 200, but one counted lifetimes and the other ticks — same number,
+# different units, easy to misread while editing either loop). Split into its
+# own constant so "200" always means one specific thing wherever it's read.
+ECOSYSTEM_SAVE_EVERY_TICKS = 200   # ticks between periodic checkpoint saves
+                                   # in ecosystem_step-driven loops
 BEST_METRIC_WINDOW  = 50    # lifetimes averaged for the "is this a new best" check
 
 # ── Experiment run configuration ──────────────────────────────────────────────
-NUM_LIFETIMES  = 4000     # how many lifetimes to train across
+NUM_LIFETIMES  = 1000     # how many lifetimes to train across
 PRINT_EVERY    = 100      # progress line frequency during training
 SEED           = 42
 DEMO_EPSILON   = 0.1      # demo-recording exploration (mostly-greedy; a touch
@@ -400,3 +497,19 @@ ECOSYSTEM_SNAPSHOT_EVERY = 10    # record 1 GIF frame every N ticks (recording
                                  # would make an unreasonably large/slow GIF)
 ECOSYSTEM_LOG_EVERY      = 50    # console/CSV progress line frequency
 ECOSYSTEM_GIF_FPS        = 10
+
+# ── live_viewer.py-only overrides (2026-09) ──────────────────────────────────
+# Deliberately NOT used by run_experiment.py / population.py's defaults —
+# Khanh wants the actual training run's exploration schedule (EPSILON_START,
+# whatever training_state.json has saved) left completely untouched; this is
+# purely so the interactive viewer doesn't spend most of a session showing
+# individuals that are almost entirely random (training_state.json's saved
+# epsilon can be anywhere up to 1.0 depending how early training still is —
+# see EPSILON_START/INLIFE_EPSILON_DECAY above for why that's not itself a
+# bug). live_viewer.py passes this explicitly to spawn_founder() (in place of
+# the loaded training_state.json epsilon) and to ecosystem_step()'s
+# child_epsilon= (in place of reproduce()'s EPSILON_START default) — nothing
+# in population.py defaults to this value, so run_experiment.py is unaffected.
+LIVE_VIEWER_START_EPSILON = 0.4   # combined with INLIFE_EPSILON_DECAY=0.97,
+                                  # reaches EPSILON_MIN by ~tick 87 of an
+                                  # individual's life

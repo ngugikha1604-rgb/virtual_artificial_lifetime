@@ -40,6 +40,12 @@ class EpsilonGreedyPolicy:
             return random.randint(0, num_actions - 1)
         return int(np.argmax(q_values))
 
-    def decay(self):
-        """Shrink epsilon after each episode, but never below epsilon_min."""
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+    def decay(self, rate=None):
+        """Shrink epsilon, but never below epsilon_min. `rate` defaults to
+        self.epsilon_decay (the ORIGINAL between-lifetimes cadence, unchanged
+        for every existing caller that passes nothing) — pass an explicit
+        `rate` to use a different decay speed for a different purpose without
+        needing a second policy object (see config.INLIFE_EPSILON_DECAY /
+        population.py's ecosystem_step for the within-lifetime use of this)."""
+        r = rate if rate is not None else self.epsilon_decay
+        self.epsilon = max(self.epsilon_min, self.epsilon * r)

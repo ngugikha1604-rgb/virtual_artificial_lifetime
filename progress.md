@@ -11,6 +11,118 @@
 > **kỳ vọng quan sát được gì** nếu đúng, không đi sâu "dùng công cụ/dòng code nào" (phần đó nằm
 > ở các mục kỹ thuật phía dưới, dùng khi cần debug).
 
+**17. Spawn founder ngẫu nhiên trên world (thay vì cố định trung tâm)**
+- Mục đích: Khanh muốn agent đầu tiên sinh ra ở 1 ô ngẫu nhiên bất kỳ, miễn không phải wall và
+  không có hazard — thay vì luôn cố định giữa world.
+- Đã sửa: `World.spawn_point()` giờ roll ngẫu nhiên vị trí + facing, tính **đúng 1 lần** khi tạo
+  World và cache lại (`self._spawn_point`) — vì `_init_terrain()`/`_init_entities()` đều gọi lại
+  hàm này và phải thấy cùng 1 giá trị, không được roll lại mỗi lần gọi. Thêm `self._reserved_cells`
+  để loại trừ ô spawn khỏi MỌI chỗ đặt entity (food/hazard) — trước đây chỉ tránh được wall (nhờ
+  carve terrain xung quanh ô đã chọn), nhưng hazard đặt SAU khi đã chọn spawn nên cần loại trừ
+  tường minh, nếu không hazard vẫn có thể ngẫu nhiên rơi đúng ô spawn.
+- **Đã verify bằng chạy thật** (500 seed khác nhau): 500/500 lần ô spawn không phải wall, 500/500
+  lần không có hazard, 44/50 seed cho vị trí khác nhau (trùng lặp còn lại là ngẫu nhiên bình
+  thường, world chỉ 100 ô); 200 seed xác nhận invariant cũ "mỗi zone 3×3 có ≥ 1 food" vẫn giữ
+  nguyên dù đã trừ đi ô spawn.
+- Không invalidate brain (không đụng shape/observation).
+
+**18. `experiments/pretrain_single_agent.py` — file mới, pretrain đơn-agent làm nền tảng trước ecosystem**
+- Mục đích: Khanh nhận thấy ecosystem (dù đã sửa reward + epsilon) vẫn không học được hành vi
+  "khôn" rõ rệt — thấy food mà không ăn, cứ quay đi. So sánh với bản đơn-agent cũ (`run_episode.py`)
+  học nhanh hơn hẳn. Thay vì sửa sâu cơ chế học của ecosystem (rủi ro cao hơn — xem Roadmap mục 4),
+  Khanh chọn hướng đơn giản hơn: dùng lại vòng lặp đơn-agent (đã chứng minh học tốt — 8 window đa
+  dạng/lần học từ pool episode đã xong, so với ecosystem chỉ có 1 window/lần từ đuôi đời đang sống)
+  để xây 1 brain nền tảng vững trước, rồi mới cho ecosystem tiếp quản từ đó để tiến hoá/đa dạng hoá.
+- File mới, KHÔNG thay thế `run_experiment.py` — là bước làm nền tảng (1 lần hoặc thỉnh thoảng),
+  không phải chạy trước mỗi phiên ecosystem. Đọc/ghi ĐÚNG `results/best_model.pt`/`training_state.json`
+  chung với mọi entry point khác — chạy xong, `run_experiment.py`/`live_viewer.py` tự động found
+  population từ brain đã pretrain, không cần thao tác gì thêm.
+- Checkpoint theo đúng thiết kế gốc trước khi ecosystem ra đời (mục "Đã sửa thêm... best-model
+  checkpointing" phía trên): mỗi `SAVE_EVERY` lifetime (crash safety) HOẶC khi rolling mean
+  `total_reward` qua `BEST_METRIC_WINDOW=50` lifetime gần nhất vượt kỷ lục cũ thì lưu.
+- **Đã verify bằng chạy thật trong sandbox**: 30 lifetime đầu chạy sạch, không crash, lưu đúng
+  (`best_metric: null` vì chưa đủ `BEST_METRIC_WINDOW`); chạy tiếp tới lifetime 90 — xác nhận cơ
+  chế rolling-mean thực sự kích hoạt đúng (`best_metric` chuyển từ `null` sang `10.45`, không còn
+  là code chưa test).
+
+**19. Thêm `tests/` — bộ test tự động đầu tiên cho project (pytest)**
+- Mục đích: sau 1 senior-style review, phát hiện toàn bộ việc verify từ trước tới giờ đều là
+  "chạy sandbox rồi đọc kết quả bằng mắt" — không có gì ngăn 1 thay đổi sau này âm thầm phá
+  vỡ lại 1 invariant đã từng verify thủ công rồi quên mất.
+- Đã thêm `tests/conftest.py` (setup `sys.path`, giống pattern đang dùng ở mọi entry point —
+  chưa chuyển sang package thật, xem Roadmap mục 5) + 16 test chia 4 file:
+  - `test_world.py`: spawn không bao giờ trúng wall/hazard, `spawn_point()` cache đúng (không
+    roll lại mỗi lần gọi), mọi zone 3×3 có ≥1 food.
+  - `test_policy.py`: `decay()` dùng đúng rate mặc định, clamp đúng epsilon_min, `rate=` override
+    không làm đổi `epsilon_decay` gốc.
+  - `test_training_state.py`: round-trip JSON, `-inf` ↔ `null`, file thiếu/hỏng trả `None` thay
+    vì crash.
+  - `test_model_io.py`: save/load round-trip đúng weight, load từ checkpoint sai shape phải raise
+    `ValueError`, `load_weights_or_fresh()` (hàm mới từ mục refactor trước) fallback đúng cho
+    cả 3 trường hợp: thiếu file / checkpoint không tương thích / checkpoint hợp lệ.
+- **Đã verify bằng chạy thật**: `pytest tests/` — 16/16 pass trong sandbox trước khi ghi vào
+  project thật (nội dung y hệt, không chỉnh gì sau khi copy sang).
+- Cách chạy: `pip install pytest` rồi `pytest tests/` từ thư mục gốc project.
+
+**12. Vision chỉ thấy phía trước (`BEHIND_ROWS` 2→0)**
+- Mục đích: Khanh phát hiện agent "nhìn thấy" cả 2 hàng phía sau lưng trong panel local-vision —
+  không đúng ý ban đầu ("tôi cần nó chỉ thấy phía trước thôi, kiểu vision như con người").
+- Sự thật khi audit: agent KHÔNG thực sự thấy sau lưng — 2 hàng đó luôn là `CELL_UNKNOWN=0`
+  (hằng số chết, không mang thông tin gì), chỉ tốn 80 chiều input vô ích. Đặt `BEHIND_ROWS=0`
+  loại bỏ hoàn toàn, không cần sửa file nào khác (`world.py`/`world_tick.py`/`lstm_q_network.py`
+  đều đọc `world.behind_rows`/`config.VIEW_H` runtime).
+- **Invalidate `best_model.pt` cũ** (đổi `VIEW_H` 6→4 → đổi shape `ConvLSTMDQN`) — cần train lại.
+
+**13. Reward rebalance — giảm "thưởng miễn phí", tăng "thưởng vì khôn"**
+- Mục đích: audit phát hiện 1 policy "đi thẳng, đâm tường rồi đứng ì" vẫn đạt được ~140 điểm —
+  vì `REPRODUCE_BONUS`/`AGE_BONUS`/`MAX_AGE_SURVIVAL_BONUS` (thưởng cho sống dai + đẻ được, cả
+  hai không cần "khôn" gì) quá lớn so với `SHAPE_WEIGHT_*` (thưởng duy nhất thật sự gắn với
+  điều hướng có chủ đích).
+- Đã sửa: `SHAPE_WEIGHT_FOOD`/`SHAPE_WEIGHT_HAZARD` 0.10→**1.0** (10x); `REPRODUCE_BONUS`
+  4.0→**1.0**; `AGE_BONUS_PER_TICK` 0.05→**0.025**; `MAX_AGE_SURVIVAL_BONUS` 10.0→**5.0**.
+- Hệ quả cần biết: `total_reward` giờ ở thang điểm THẤP HƠN hẳn kỷ lục cũ (141.98) — đã reset
+  `best_metric` trong `training_state.json` về `null` (giữ nguyên weight/epsilon) để checkpoint
+  không bị đóng băng vì so với 1 kỷ lục không còn cùng thang đo.
+- Không invalidate brain (không đụng shape/observation).
+
+**14. `SURVIVAL_BONUS` đổi từ hằng số cố định sang công thức liên tục theo energy/health**
+- Mục đích: `SURVIVAL_BONUS=0.001` cố định mỗi tick không phân biệt được cá thể "sống tốt"
+  (energy/health cao) với cá thể "sống lay lắt" — và khi cả quần thể học được cách sống đủ
+  `MAX_AGE`, phần lớn `total_reward` giống nhau y hệt (chỉ khác terminal bonus, mà terminal
+  bonus lại CỐ ĐỊNH cho mọi ai sống hết đời) → `best_metric` không phân biệt được ai giỏi hơn.
+- Đã sửa: `reward = SURVIVAL_BONUS * (energy/MAX_ENERGY) * (health/MAX_HEALTH)` — dùng TÍCH (không
+  phải trung bình) để cần CẢ HAI đều cao mới được thưởng đầy đủ; một trong hai tụt thấp thì phần
+  thưởng này sập gần 0 ngay, sớm hơn cả lúc đói/hazard thật sự gây damage. `SURVIVAL_BONUS` tăng
+  0.001→0.01 (bù lại vì giờ không còn là noise sàn nữa, mà là tín hiệu thật).
+
+**15. Epsilon: thêm decay THẬT TRONG MỘT ĐỜI SỐNG (`INLIFE_EPSILON_DECAY`)**
+- Phát hiện qua audit: `policy.decay()` trước đó chỉ gọi ĐÚNG 1 LẦN — lúc cá thể chết (vô nghĩa
+  với chính nó, vì nó bị discard ngay sau) — nên epsilon của MỌI cá thể (founder hay con) không
+  bao giờ giảm trong suốt đời nó, hành vi ngẫu nhiên y hệt từ đầu đến cuối đời.
+- Đã sửa: `EpsilonGreedyPolicy.decay()` nhận thêm `rate=` tuỳ chọn (mặc định không đổi hành vi cũ);
+  `ecosystem_step()` gọi `decay(rate=config.INLIFE_EPSILON_DECAY)` **mỗi tick**. Tốc độ 0.97 (sau
+  khi tự sửa lại từ 0.985 lúc đầu — 0.985 chạm sàn `EPSILON_MIN` ở tick ~186, TRỄ hơn tuổi thọ
+  trung bình ~150-250 tick; 0.97 chạm sàn ~tick 90-100, kịp cho đa số cá thể có giai đoạn "chín"
+  thật trước khi chết). Áp dụng cho cả `run_experiment.py` VÀ `live_viewer.py` (code chung).
+- `CHILD_INITIAL_EPSILON` (hằng số chết, không ai dùng — xem roadmap mục 4 cũ) đã xoá.
+- **Không phải bug ở khâu lưu model**: đã audit kỹ `check_and_save_best`/`run_experiment.py` —
+  logic lưu là một chiều (chỉ ghi đè khi điểm MỚI cao hơn), và luôn load đúng `best_metric` cũ
+  khi resume — không có đường nào để 1 kỷ lục đã đạt bị mất qua các lần chạy.
+- **Hạn chế còn tồn đọng (chưa sửa, ghi nhận cho tương lai)**: learning signal trong ecosystem
+  yếu hơn hẳn `run_episode.py` gốc — mỗi lần `learn_windows()` chỉ có **1 window** (đuôi đời
+  đang sống của chính nó), so với **8 window** lấy ngẫu nhiên từ pool episode đã xong (đa dạng)
+  ở bản đơn-agent. Đây rất có thể là lý do chính khiến hành vi ecosystem cải thiện chậm/thất
+  thường hơn — chưa sửa, cần quyết định thiết kế riêng (xem Roadmap).
+
+**16. Gộp `live_viewer.py` + `god_view.py` thành 1 file duy nhất**
+- Mục đích: thử nghiệm `god_view.py` (world 50×50, chạy chậm, liên tục, "xem như 1 vị thần")
+  hoá ra gần giống `live_viewer.py` cũ — Khanh yêu cầu chỉ giữ 1.
+- Đã sửa: `live_viewer.py` giờ LÀ bản world to (50×50, food/hazard đếm lại theo đúng tỷ lệ zone
+  3×3 như world train 10×10 để không bị trống rỗng), tốc độ mặc định chậm (2 FPS, chỉnh được),
+  chạy liên tục. Thêm UI thân thiện hơn: màu sinh vật theo tình trạng sức khoẻ (xanh/vàng/đỏ),
+  click chọn sinh vật để theo dõi, nhãn tiếng Việt, mood label. `god_view.py` chuyển vào
+  `archive/` (không xoá thật — không có tool xoá file, và đúng convention archive-không-xoá).
+
 **8. Food expiration lifecycle (`food_low → food_high → food_low → rotten_food → biến mất`)**
 - Mục đích: world cũ có food tồn tại mãi mãi cho đến khi bị ăn — không có cảm giác "thời gian
   trôi" hay áp lực phải hành động kịp. Lifecycle 4 stage (mỗi stage 5 tick) tạo ra trade-off
@@ -349,7 +461,8 @@ virtual_lifetime/
 │       ├── visualize.py          Matplotlib GIF recorder (single-agent + ecosystem)
 │       └── live_viewer.py        Pygame interactive 2D viewer
 ├── experiments/
-│   └── run_experiment.py     Entry point chính: ecosystem training + checkpoint + GIF + CSV
+│   ├── run_experiment.py         Entry point chính: ecosystem training + checkpoint + GIF + CSV
+│   └── pretrain_single_agent.py  (mới) Pretrain đơn-agent làm nền tảng trước khi chạy ecosystem
 └── results/
     ├── best_model.pt         Duy nhất 1 file weight, dùng chung bởi mọi entry point
     ├── training_state.json   Epsilon + lifetimes + best_metric persist qua các lần chạy
@@ -403,7 +516,7 @@ trực tiếp được nữa.
    - Log hành vi định tính (heatmap vị trí, biểu đồ action distribution theo thời gian).
 3. Thế giới phong phú hơn (world lớn hơn, địa hình đa dạng hơn, ngày/đêm) — chỉ thêm khi phục
    vụ trực tiếp mục tiêu "quan sát behavior" hoặc "làm game".
-4. Xóa `CHILD_INITIAL_EPSILON` khỏi config.py (không còn được dùng sau khi đổi sang `EPSILON_START`).
+4. **Learning signal trong ecosystem quá yếu** — mỗi `learn_windows()` chỉ có 1 window (đuôi đời đang sống, không đa dạng) thay vì 8 window từ pool episode đã xong như `run_episode.py` gốc. **Đã chọn hướng giảm nhẹ trước** (không phải sửa kết kiến trúc): dùng `experiments/pretrain_single_agent.py` (mục 18 ở trên) để xây brain nền tảng vững bằng vòng lặp đơn-agent trước, rồi mới cho ecosystem tiếp quản. Nếu sau khi pretrain đủ lâu mà ecosystem vẫn không giữ/cải thiện được độ "khôn" đã có từ pretrain, mới cần quay lại sửa chính cơ chế học của ecosystem (VD chia sẻ replay pool giữa các cá thể).
 6. Nếu mục tiêu game rõ hơn theo thời gian: cân nhắc tách phần "brain training" ra khỏi phần
    "world rendering/game loop" rõ ràng hơn nữa, để có thể đóng gói world như một sản phẩm xem/chơi
    độc lập với việc có đang train hay không.
