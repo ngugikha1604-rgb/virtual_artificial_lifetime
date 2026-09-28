@@ -139,6 +139,16 @@ class World:
         self._reserved_cells = {self._spawn_point[0]}
         self._init_terrain()   # BEFORE entities: entity spawn avoids wall cells
         self._init_entities()
+        # Initial food follows the same visible lifecycle as food grown later.
+        # The starter food remains exempt because it is the guaranteed first
+        # meal for a newborn resident.
+        for entity in self.entities:
+            if entity["type"] == "food_low":
+                age = np.random.randint(0, FOOD_AGE_STAGE_TICKS)
+                self.food_ages[id(entity)] = (int(age), 0)
+            elif entity["type"] == "food_high":
+                age = np.random.randint(0, FOOD_AGE_STAGE_TICKS)
+                self.food_ages[id(entity)] = (int(age), 1)
 
     def _roll_spawn_point(self):
         """Pick a uniformly random in-bounds cell + random facing for a new
@@ -267,18 +277,21 @@ class World:
             if cell not in occupied:
                 return cell
 
-    def random_adjacent_cell(self, pos):
+    def random_adjacent_cell(self, pos, occupied=None):
         """A free (non-wall), in-bounds cell orthogonally adjacent to `pos`,
         or None if all 4 neighbors are wall/out-of-bounds. Used by
         src/rl/population.py to place a newborn agent next to its parent.
-        Does NOT consider other agents' positions — agents don't block or
-        occupy cells exclusively from each other's perspective in this first
-        ecosystem phase (see progress.md), only terrain/entities matter here,
-        exactly like every other placement helper in this file."""
+        ``occupied`` is an optional set of resident positions. World itself
+        does not own residents, so the population layer supplies this set when
+        it needs a genuinely free birth cell.
+        """
         x, y = pos
         candidates = [(x+1, y), (x-1, y), (x, y+1), (x, y-1)]
+        occupied = set(occupied or ())
         candidates = [c for c in candidates
-                     if self._in_bounds(c) and self.terrain[c[0], c[1]] != self.CELL_WALL]
+                     if self._in_bounds(c)
+                     and self.terrain[c[0], c[1]] != self.CELL_WALL
+                     and c not in occupied]
         if not candidates:
             return None
         return candidates[np.random.randint(len(candidates))]

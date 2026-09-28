@@ -11,6 +11,18 @@
 > **kỳ vọng quan sát được gì** nếu đúng, không đi sâu "dùng công cụ/dòng code nào" (phần đó nằm
 > ở các mục kỹ thuật phía dưới, dùng khi cần debug).
 
+**20. Ecosystem Burn-in & Multi-window Sampling từ đời đang sống (R2D2-style)**
+- Mục đích: Giải quyết vấn đề cốt lõi của ecosystem: mỗi cá thể trước đây chỉ học từ 1 window duy nhất ở đuôi (`current_tail`), lặp lại mỗi 4 tick (batch quá nhỏ + recency-biased làm gradient nhiễu). Do cá thể ecosystem chỉ sống 1 đời duy nhất nên không thể sample từ nhiều đời như single-agent; cách giải quyết là sample nhiều window từ các mốc khác nhau trong quá khứ của chính đời đang sống, kết hợp **burn-in** để làm tươi lại hidden state `(h, c)` với trọng số hiện tại (tránh dùng `(h0, c0)` cũ đã bị lệch phân phối).
+- Đã triển khai:
+  - `src/config.py`: Thêm `BATCH_SIZE_ECOSYSTEM = 4`, `BURN_IN_N = 16`.
+  - `src/rl/lstm_replay_buffer.py`: Thêm `sample_current_windows(k, window_n, burn_in_n)`: fallback về toàn bộ episode nếu `L < window_n + 1`; khi đủ dài, sample ngẫu nhiên `k` điểm bắt đầu và cắt cặp `(burn_in_slice, learn_slice)` với burn-in giới hạn tối đa `BURN_IN_N=16` bước.
+  - `src/rl/torch_agent.py`: Thêm `_zero_state()`, `_burn_in()` và `learn_windows_burned_in(pairs)`. Chạy burn-in không grad cho cả online net và target net độc lập từ `zero_state()`, sau đó unroll `learn_slice` với target bootstrap và MSE loss. Tái cấu trúc logic cập nhật qua `_apply_learn_update()`.
+  - `src/rl/population.py`: Nối `ind.replay.sample_current_windows` và `ind.brain.learn_windows_burned_in` vào `ecosystem_step`.
+  - `tests/test_burn_in.py`: Bộ unit test mới cho cả buffer và brain burn-in. Toàn bộ test suite 19/19 pass.
+- Benchmark thực tế (Phần E, trên 1000 tick seed 42):
+  - Baseline (1 window, không burn-in): 19.99s, **50.02 tick/s**.
+  - Mới (4 window, burn-in 16): 88.36s, **11.32 tick/s** (~4.4x chậm hơn, phù hợp kỳ vọng lý thuyết 4 window x 32 bước forward, vẫn đạt tốc độ tốt >11 tick/s).
+
 **17. Spawn founder ngẫu nhiên trên world (thay vì cố định trung tâm)**
 - Mục đích: Khanh muốn agent đầu tiên sinh ra ở 1 ô ngẫu nhiên bất kỳ, miễn không phải wall và
   không có hazard — thay vì luôn cố định giữa world.

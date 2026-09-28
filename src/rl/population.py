@@ -56,6 +56,7 @@ from world_tick import world_tick
 from run_episode import compute_reward
 from model_io import save_lstm_weights
 from training_state import save_training_state
+from behavior import RuleBasedController
 import config
 
 
@@ -70,13 +71,17 @@ class Individual:
     _next_id = 0
 
     def __init__(self, world, net, epsilon, generation=0, parent_id=None,
-                 position=None, facing=None):
+                 position=None, facing=None, controller="neural", brain=None):
         self.id = Individual._next_id
         Individual._next_id += 1
         self.generation   = generation
         self.parent_id    = parent_id
         self.total_reward = 0.0   # this individual's own fitness score, see
                                   # check_and_save_best() below
+        self.event_history = []
+        self.last_action = 0
+        self.last_position = None
+        self.last_event = None
 
         self.agent = Agent(world, max_age=config.MAX_AGE)
         if position is not None:
@@ -84,9 +89,14 @@ class Individual:
         if facing is not None:
             self.agent.facing = facing
 
-        policy = EpsilonGreedyPolicy(epsilon=epsilon, epsilon_min=config.EPSILON_MIN,
-                                     epsilon_decay=config.EPSILON_DECAY)
-        self.brain  = TorchQAgent(net, policy)
+        if brain is not None:
+            self.brain = brain
+        elif controller == "rules":
+            self.brain = RuleBasedController()
+        else:
+            policy = EpsilonGreedyPolicy(epsilon=epsilon, epsilon_min=config.EPSILON_MIN,
+                                         epsilon_decay=config.EPSILON_DECAY)
+            self.brain = TorchQAgent(net, policy)
         self.replay = LSTMReplayBuffer()
         self.replay.start_episode()
         self.steps  = 0   # local per-individual tick counter, gates LEARN_EVERY
@@ -103,7 +113,8 @@ class Individual:
                                    self.agent.internal_state, None)
 
 
-def spawn_founder(world, epsilon=config.EPSILON_START, generation=0, net=None):
+def spawn_founder(world, epsilon=config.EPSILON_START, generation=0, net=None,
+                  position=None, facing=None, controller="neural", parent_id=None):
     """A new individual seeding the population. `net` defaults to a fresh
     random-weight brain (used to re-seed the ecosystem after a total
     extinction); pass an existing net (e.g. loaded from results/best_model.pt)
@@ -111,9 +122,11 @@ def spawn_founder(world, epsilon=config.EPSILON_START, generation=0, net=None):
     instead of starting over — the founder gets that net AS-IS, unmutated
     (only children born via reproduce() get mutation; a founder is a direct
     continuation of a specific saved brain, not a variant of it)."""
-    if net is None:
+    if net is None and controller != "rules":
         net = build_lstm_network()
-    return Individual(world, net, epsilon, generation=generation)
+    return Individual(world, net, epsilon, generation=generation,
+                      position=position, facing=facing, controller=controller,
+                      parent_id=parent_id)
 
 
 def mutate_weights(net):
@@ -128,7 +141,8 @@ def mutate_weights(net):
     return child_net
 
 
-def reproduce(parent, world, current_population_size, child_epsilon=None):
+def reproduce(parent, world, current_population_size, child_epsilon=None,
+              occupied_positions=None):
     """Try to spawn a mutated child of `parent`. Returns the new Individual,
     or None if there's no room under MAX_POPULATION or no free cell exists
     next to the parent (in which case the parent's energy is left untouched
@@ -143,59 +157,39 @@ def reproduce(parent, world, current_population_size, child_epsilon=None):
     pass this, so real training is completely unaffected."""
     if current_population_size >= config.MAX_POPULATION:
         return None
-    cell = world.random_adjacent_cell(parent.agent.position)
+    cell = world.random_adjacent_cell(parent.agent.position,
+                                      occupied=occupied_positions)
     if cell is None:
         return None
 
     parent.agent.energy -= config.REPRODUCTION_ENERGY_COST
-    child_net = mutate_weights(parent.brain.net)
+    if parent.brain.net is None:
+        child_brain = parent.brain.clone()
+        child_net = None
+    else:
+        child_brain = None
+        child_net = mutate_weights(parent.brain.net)
     epsilon = child_epsilon if child_epsilon is not None else config.EPSILON_START
     return Individual(world, child_net, epsilon,
                       generation=parent.generation + 1, parent_id=parent.id,
-                      position=cell, facing=parent.agent.facing)
+                      position=cell, facing=parent.agent.facing,
+                      controller="neural", brain=child_brain)
 
 
 def ecosystem_step(world, population, auto_reseed=True, child_epsilon=None,
-                   tick_count=None):
+                   tick_count=None, enable_learning=True, on_event=None,
+                   decay_exploration=True):
     """
     Advance the whole ecosystem by ONE tick: every living individual acts
-    once (world_tick — the exact same function run_episode.py uses for a
-    single agent), reproduces automatically if it qualifies, and learns from
-    the TAIL of its own still-unfolding life (LSTMReplayBuffer.current_tail)
-    every LEARN_EVERY ticks — NOT the same mechanism as run_episode.py's
-    sample_windows()-over-K-closed-episodes, because an ecosystem individual
-    only ever lives ONE episode total; there is no pool of past completed
-    lives of ITS OWN to sample from during its life (see current_tail's
-    docstring in lstm_replay_buffer.py for why).
+    once (world_tick), reproduces automatically if it qualifies, and (if
+    enable_learning is True) learns from the tail of its own life.
 
-    Processing order is reshuffled each tick — otherwise whichever individual
-    happened to be first in `population` would systematically win any
-    contested single-serving food adjacent to more than one individual (the
-    only "interaction" that exists at all between individuals in this phase,
-    since they don't block or perceive each other — see population.py's
-    module docstring).
+    `enable_learning` (default True): controls gradient updates and replay.
+    `decay_exploration` is separate so a viewer can freeze weights while still
+    letting a resident become less random as its life progresses.
 
-    Dead individuals are removed at the end of the tick. If the population
-    drops to zero and `auto_reseed` is True (the default — used by the
-    unattended training drivers), a fresh founder is spawned so the
-    simulation keeps going (an "extinction reseed" — shows up as a
-    population dip to 1 in a log). Pass auto_reseed=False (e.g. for an
-    interactive viewer where a real "population extinct, please reset"
-    moment is wanted) to instead leave `population` empty.
-
-    Returns (births: list[Individual], deaths: list[Individual]) for logging.
-
-    `child_epsilon` (default None): passed through to reproduce() for any
-    child born this tick; None keeps the original config.EPSILON_START
-    default (used by run_experiment.py). live_viewer.py passes
-    config.LIVE_VIEWER_START_EPSILON instead — a viewer-only override, see
-    that constant's comment in config.py.
-
-    `tick_count` (default None): the caller's current global tick counter.
-    When provided and config.LOG_LEARN_EVERY > 0, a one-line learn-stats
-    summary is printed every LOG_LEARN_EVERY ticks — loss trend, Q-value
-    range, gradient norm, and number of active learners. Pass None (the
-    default) to suppress all learn logging with zero overhead.
+    `on_event` (default None): optional callable(individual, event_dict)
+    called whenever an individual encounters a world event (food, hazard, starvation).
     """
     order = list(population)
     np.random.shuffle(order)
@@ -205,10 +199,7 @@ def ecosystem_step(world, population, auto_reseed=True, child_epsilon=None,
     # Snapshot all positions BEFORE anyone moves this tick — this is the
     # "simultaneous tick" model: every agent observes the same consistent
     # start-of-tick state when it decides its action, regardless of the
-    # sequential processing order imposed by the for-loop below. Without
-    # this, agents processed later would see a mix of pre- and post-move
-    # positions from agents processed earlier, which is neither simultaneous
-    # nor sequential — just inconsistent.
+    # sequential processing order imposed by the for-loop below.
     positions_snapshot = frozenset(ind.agent.position for ind in population)
 
     for ind in order:
@@ -217,6 +208,16 @@ def ecosystem_step(world, population, auto_reseed=True, child_epsilon=None,
         result = world_tick(world, ind.agent, ind.brain, ind.x, ind.h, ind.c,
                             other_positions=other_pos)
 
+        ind.last_action = result.action
+        ind.last_position = ind.agent.position
+        ind.last_event = result.event
+
+        if on_event is not None:
+            if result.event is not None:
+                on_event(ind, result.event)
+            elif result.starved:
+                on_event(ind, {"category": "starvation", "type": "starved"})
+
         reward = compute_reward(result.event, result.prev_pos, result.prev_facing,
                                 ind.agent.position, world, starved=result.starved,
                                 done=result.done, age=ind.agent.age,
@@ -224,35 +225,41 @@ def ecosystem_step(world, population, auto_reseed=True, child_epsilon=None,
                                 energy=ind.agent.energy, health=ind.agent.health)
 
         if not result.done and ind.agent.energy >= config.ENERGY_TO_REPRODUCE:
+            occupied_positions = {
+                other.agent.position for other in population
+                if other is not ind and other not in deaths
+            }
+            occupied_positions.update(child.agent.position for child in births)
             child = reproduce(ind, world, len(population) + len(births),
-                              child_epsilon=child_epsilon)
+                              child_epsilon=child_epsilon,
+                              occupied_positions=occupied_positions)
             if child is not None:
                 births.append(child)
                 reward += config.REPRODUCE_BONUS
 
-        # Phase B: store the tick in ind's own episode with its PRE-tick
-        # hidden (h,c) as the anchor — mirrors run_episode.py exactly.
-        # Use result.x_used (the observation world_tick actually fed to the
-        # brain) rather than ind.x (the stored observation without channel 9
-        # injected), so the (obs, action) pair in the buffer is consistent.
-        ind.replay.push(result.x_used, ind.h, ind.c, result.action, reward, result.done)
+        # PRE-tick hidden state: the (h,c) that world_tick was given for this
+        # tick. Must be captured BEFORE ind.h/ind.c are overwritten below.
+        h_prev, c_prev = ind.h, ind.c
+
         ind.total_reward += reward
         ind.x, ind.h, ind.c = result.x_next, result.h_new, result.c_new
         ind.steps += 1
 
-        if ind.steps % config.LEARN_EVERY == 0:
-            window = ind.replay.current_tail(config.WINDOW_N)
-            if window:
-                ind.brain.learn_windows([window])
+        if enable_learning:
+            # Phase B: store the tick in ind's own episode with its PRE-tick
+            # hidden (h,c) as the anchor — mirrors run_episode.py exactly.
+            ind.replay.push(result.x_used, h_prev, c_prev, result.action, reward, result.done)
 
-        # Within-lifetime decay (2026-09, see config.INLIFE_EPSILON_DECAY):
-        # every tick, not just once at death — makes the exploration rate
-        # actually fall over the course of THIS individual's own life,
-        # instead of only mattering to whichever future individual happens
-        # to load a decayed value later. Applies unconditionally (whether or
-        # not this tick ends the individual's life); harmless on a death
-        # tick since the Individual is discarded right after anyway.
-        ind.brain.policy.decay(rate=config.INLIFE_EPSILON_DECAY)
+            if ind.steps % config.LEARN_EVERY == 0:
+                windows = ind.replay.sample_current_windows(
+                    config.BATCH_SIZE_ECOSYSTEM, config.WINDOW_N, burn_in_n=config.BURN_IN_N
+                )
+                if windows:
+                    ind.brain.learn_windows_burned_in(windows)
+
+        # Exploration schedule is independent from gradient learning.
+        if decay_exploration:
+            ind.brain.policy.decay(rate=config.INLIFE_EPSILON_DECAY)
 
         if result.done:
             deaths.append(ind)

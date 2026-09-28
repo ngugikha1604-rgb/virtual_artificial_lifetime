@@ -9,3 +9,11 @@ results/best_model.pt
 results/training_state.json
 results/ecosystem_lifetime.gif
 results/ecosystem_log.csv
+.pytest_temp/
+.pytest-temp/
+.pytest_cache/
+.pytest-review*/
+
+# World saves (generated while playing)
+results/world_save.json
+results/world_save.json.brains.pt

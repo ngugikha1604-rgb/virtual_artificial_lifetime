@@ -1,258 +1,123 @@
 # Virtual Lifetime
 
-> A simulation of a small 2D creature that lives, learns, and develops inside a persistent
-> virtual world — built to be watched and understood, not just measured.
+> Một thế giới nhỏ có các sinh vật sống trong đó. Mở lên để xem chúng đi lại, tìm thức ăn, tránh nguy hiểm, lớn lên, sinh sản và thay đổi theo thời gian.
 
-## 1. Why this project exists
+## Ý tưởng cốt lõi
 
-**This project's purpose changed.** It began as a from-scratch learning exercise (implement
-neural networks, backprop, LSTM, Conv2D by hand in NumPy to understand every mechanism). That
-phase is over and its code has been retired. The project now uses PyTorch for the neural network
-plumbing, and the goal is different:
+Virtual Lifetime trước hết là một **thế giới thu nhỏ có thể quan sát**. Người dùng không mở chương trình để huấn luyện một mô hình hay theo dõi loss. Họ mở nó như mở cửa sổ nhìn vào một nơi đang sống: môi trường có nhịp điệu riêng, mỗi cá thể có trạng thái và lịch sử, và những gì xảy ra tiếp theo không được viết sẵn thành một màn trình diễn.
 
-> Build a small persistent 2D world containing a creature, and watch how its **behavior** —
-> not its weights — changes as it lives through a simulated lifetime and learns from experience.
+Hãy hình dung một terrarium kỹ thuật số: thức ăn xuất hiện và biến mất theo điều kiện của thế giới; địa hình ảnh hưởng đến việc đi lại; các sinh vật cần duy trì cơ thể, khám phá, phản ứng với những gì chúng cảm nhận được, già đi và có thể sinh con. Người dùng có thể quan sát cả thế giới hoặc theo dõi một cá thể, tua/chỉnh tốc độ, tạm dừng, và về sau tác động nhẹ lên môi trường nếu điều đó làm trải nghiệm thú vị hơn.
 
-This can serve two purposes, not mutually exclusive:
+Mục tiêu là tạo ra những khoảnh khắc khiến người xem muốn nán lại: một cá thể tìm ra nơi có thức ăn, tránh một vùng nguy hiểm, quay lại một nơi quen thuộc, sinh con, hoặc biến mất khỏi thế giới. Hành vi không cần giống sinh học thật hay đạt một điểm số cao. Thế giới cần nhất quán, dễ đọc và tạo ra những diễn biến thú vị để quan sát.
 
-- A **visualization / observation tool**: something to run and watch, to build intuition for how
-  a simple learning creature explores, finds food, avoids hazards, and how that behavior evolves
-  across a lifetime and across generations of training.
-- The seed of a **small game**: a persistent creature/world that a person could eventually
-  interact with, not only observe.
+## Hướng dẫn quan trọng cho AI hỗ trợ dự án
 
-Understanding the underlying ML mechanics is no longer the point of this project — using a
-standard framework (PyTorch) to get a working, trainable brain quickly is the right tradeoff now.
-What still matters is that the **world, the agent's body, and its behavior over time** stay
-something we can inspect, reason about, and explain.
+Khi đề xuất hoặc thực hiện thay đổi, hãy lấy các nguyên tắc sau làm chuẩn:
 
----
+1. **Đây là mô phỏng để giải trí và quan sát, không phải dự án nghiên cứu hay benchmark RL.** Không mặc định rằng mục tiêu là tăng reward, loss, fitness, tốc độ hội tụ hoặc độ phức tạp của mạng.
+2. **Thế giới là sản phẩm chính.** Ưu tiên tính liên tục, nhịp sống, tính dễ hiểu khi quan sát và cảm giác các cá thể đang tồn tại trong cùng một nơi.
+3. **Cá thể là cư dân, không phải mẫu huấn luyện dùng một lần.** Danh tính, tuổi đời, nhu cầu, quan hệ với nơi chốn và lịch sử nên có ý nghĩa trong mô phỏng. Cái chết có thể xảy ra, nhưng không nên là cách mặc định để xoay vòng dữ liệu huấn luyện.
+4. **Mở viewer phải đưa người dùng vào thế giới.** Viewer là trải nghiệm chính; không nên yêu cầu chạy một quy trình pretrain trước chỉ để có thứ đáng xem. Một thế giới mới vẫn cần có hoạt động thú vị từ đầu.
+5. **Training là chi tiết triển khai tùy chọn.** Có thể dùng neural network, luật đơn giản hoặc kết hợp chúng. Chỉ giữ cơ chế học nếu nó làm hành vi sống động hơn theo cách người xem nhận ra được.
+6. **Tách trạng thái thế giới khỏi trạng thái mô hình.** Tiến trình chính cần là thế giới/cư dân được lưu và tiếp tục; checkpoint model nếu còn cần thì là tài sản phụ, có thể thay thế hoặc bỏ qua.
+7. **Tránh biến mọi hành vi thành tối ưu hóa điểm số.** Reward nội bộ có thể hỗ trợ một bộ điều khiển, nhưng không phải thước đo thành công của sản phẩm.
+8. **Giữ thay đổi dễ quan sát và giải thích.** Khi sửa hành vi hoặc luật thế giới, nói rõ người dùng sẽ thấy khác biệt gì trong viewer.
 
-## 2. Core philosophy
+Nếu một đề xuất làm cho project giống pipeline huấn luyện hơn nhưng không cải thiện thế giới mà người dùng nhìn thấy, thì đề xuất đó không đi đúng hướng.
 
-The project favors:
+## Trạng thái hiện tại
 
-**observable, explainable behavior > architectural novelty > raw performance**
+Code hiện có một mô phỏng grid 2D, cá thể có energy/health/age, thức ăn phát triển và biến đổi theo thời gian, terrain, hazard, controller luật, Conv-LSTM/DQN tùy chọn, sinh sản, save/load world và viewer Pygame. Hai entry point người dùng cần nhớ là:
 
-A creature whose behavior changes in ways we can watch, describe, and reason about ("it used to
-wander randomly, now it beelines for food and skirts hazards") is more valuable to this project
-than a marginally higher benchmark score in a black box.
+- `train_brain.py` train/resume brain và lưu checkpoint.
+- `run_world.py` mở một world mới hoặc tiếp tục world đã lưu.
+- Các module trong `src/` là phần triển khai phụ; `experiments/pretrain_single_agent.py` được launcher training dùng nội bộ.
 
-The high-level loop the project is built around:
+Các file kết quả như brain checkpoint và world save nằm trong `results/`; chúng không được viewer ghi đè lẫn nhau.
 
-```text
-Simple neural network (PyTorch)
-        ↓
-Learning (online, during the lifetime)
-        ↓
-Agent (body + brain)
-        ↓
-Environment (2D grid world)
-        ↓
-Experience
-        ↓
-Changing weights
-        ↓
-Lifetime
-        ↓
-Observable, evolving behavior
-```
+## Roadmap refactor
 
-This is **inspired by biological development**, but it is not intended to be a faithful
-simulation of a human brain, and it is not trying to be a general "AI agent" wrapped around an
-LLM.
+### Giai đoạn 1 — Định nghĩa trải nghiệm và đổi cấu trúc điều khiển
 
----
+- Dùng live viewer làm entry point chính: khởi động là thấy thế giới, không phải chọn số tick training.
+- Đưa bước tiến của thế giới vào một `Simulation`/`WorldSession` rõ ràng, sở hữu world, cư dân, thời gian mô phỏng, sự kiện và trạng thái tạm dừng/tốc độ.
+- Viewer chỉ đọc trạng thái để vẽ và gửi lệnh người dùng như pause, speed, focus, reset hoặc save; logic thế giới không phụ thuộc Pygame.
+- Thay các thuật ngữ hướng benchmark như “best individual”, “fitness” và “training run” trong giao diện bằng khái niệm thế giới như cá thể, tuổi, nhu cầu, sự kiện và thời gian.
 
-## 3. Long-term goal
+**Kết quả mong muốn:** có thể chạy một thế giới mới và quan sát nó mà không cần gọi pretraining hay nghĩ về checkpoint mô hình.
 
-Create a small artificial creature that exists inside a persistent simulated 2D world and goes
-through something resembling a lifetime, in a way that is fun/interesting to actually watch.
+### Giai đoạn 2 — Lưu và tiếp tục một thế giới
 
-```text
-                         VIRTUAL WORLD
-                              │
-                ┌─────────────┴─────────────┐
-                │                           │
-           Environment                    Agent
-                │                           │
-        ┌───────┼────────┐          ┌───────┴────────┐
-        │       │        │          │                │
-       Time   Objects   Events     Body             Brain
-                                      │                │
-                                ┌─────┼─────┐          │
-                                │     │     │          │
-                              Energy Age   Alive    Weights (torch)
-                                                     │
-                                                     ↓
-                                                Learning
-```
+- Thiết kế world save gồm seed/trạng thái RNG, thời gian, terrain, entities/seeds, cá thể và các thuộc tính cần để tiếp tục đúng từ lần chạy trước.
+- Lưu danh tính ổn định của cá thể, tuổi, vị trí, hướng, nhu cầu, trạng thái hành vi và các sự kiện/lịch sử cần thiết.
+- Tách `world_save` khỏi model weights; cho phép mở lại thế giới kể cả khi đổi hoặc bỏ brain.
+- Thêm autosave an toàn và lựa chọn tạo thế giới mới/mở thế giới gần nhất trong viewer.
 
-The agent:
+**Kết quả mong muốn:** đóng rồi mở lại vẫn gặp cùng một thế giới và các cư dân đang sống tiếp từ trạng thái đã lưu.
 
-1. is created/born with a minimally initialized brain;
-2. perceives part of its environment (a local view around itself);
-3. chooses actions;
-4. receives consequences from the environment (food, hazards, energy cost);
-5. learns from experience, online, during its lifetime;
-6. modifies its own neural-network weights while alive;
-7. accumulates internal state/memory (LSTM hidden state) across its lifetime;
-8. ages;
-9. eventually dies (health or age runs out) or reaches the end of an episode.
+### Giai đoạn 3 — Làm cho vòng sống có thể đọc được
 
-The interesting question driving this project:
+- Kiểm tra và điều chỉnh cân bằng nhu cầu, thức ăn, hazard, di chuyển và tuổi thọ để cá thể có thời gian thể hiện hành vi.
+- Biến sự kiện thành thứ người xem dễ nhận ra: vừa ăn, đói, bị thương, sinh con, khám phá, nghỉ, chết.
+- Cải thiện cách chọn/follow một cá thể, bảng thông tin gọn, lịch sử sự kiện và điều khiển tốc độ/tạm dừng.
+- Đảm bảo thế giới có diễn biến khi bắt đầu mới, không phụ thuộc vào việc một model đã học sẵn.
 
-> **How does behavior visibly change as the same creature experiences a sequence of events
-> throughout a simulated lifetime, and as training accumulates across many lifetimes?**
+**Kết quả mong muốn:** người xem hiểu được điều gì vừa xảy ra và có lý do để tiếp tục theo dõi.
 
-Concretely, this is the kind of thing worth watching for: does the creature learn to cut through
-a costly patch of terrain (e.g. water, which is slower/more tiring to cross) when it's a genuine
-shortcut, but go around it otherwise? That's a real behavioral trade-off, not a metric — exactly
-the sort of thing this project exists to make visible.
+### Giai đoạn 4 — Tách AI hành vi khỏi hệ thống thế giới
 
-Weight values, gradients, and loss curves are implementation detail in service of that question —
-not the thing being studied for its own sake anymore.
+- Tạo interface nhỏ cho bộ điều khiển cá thể: nhận observation và trạng thái nội bộ, trả về action.
+- Có baseline luật đơn giản để thế giới luôn chạy được và làm chuẩn so sánh hành vi.
+- Đưa Conv-LSTM/DQN thành một controller có thể bật/tắt/thay thế; việc học online là lựa chọn riêng, không bị buộc vào mỗi tick của viewer.
+- Tách lưu/training state khỏi save của thế giới; không tự ghi đè một brain tốt chỉ vì cá thể có cumulative reward cao.
+- Nếu giữ học, đánh giá bằng hành vi dễ quan sát và tùy chọn lưu phiên bản; reward/loss chỉ dùng để chẩn đoán nội bộ.
 
----
+**Kết quả mong muốn:** thay đổi thuật toán không làm hỏng vòng sống, save/load hay viewer; thế giới không cần training để tồn tại.
 
-## 4. Framework use
+### Giai đoạn 5 — Tăng chiều sâu thế giới theo từng lát nhỏ
 
-PyTorch is used for the neural network (Conv2d + LSTMCell + Linear, trained with
-`torch.optim.Adam` and autograd). This is a deliberate change from the project's original
-NumPy-from-scratch phase.
+- Thêm một cơ chế đời sống mỗi lần, ví dụ nhu cầu nghỉ ngơi, ghi nhớ nơi có thức ăn, vùng lãnh thổ, quan hệ gia đình hoặc mùa/chu kỳ môi trường.
+- Mỗi cơ chế phải có biểu hiện quan sát được, trạng thái lưu được và quy tắc đủ đơn giản để giải thích.
+- Chỉ mở rộng bản đồ/đồ họa sau khi vòng đời hiện tại tạo được các diễn biến đáng xem và chạy ổn định.
 
-What is kept from the original constraint:
+**Kết quả mong muốn:** thế giới có thêm câu chuyện emergent mà không biến thành một bộ sưu tập chỉ số khó hiểu.
 
-> **The brain is trained from scratch on this project's own experience — no pretrained weights,
-> no pretrained model is loaded as the agent's brain.**
-
-What is dropped:
-
-> ~~Implement the neural network math (forward/backward/optimizer) ourselves.~~ — no longer a
-> goal. Using PyTorch's autograd and layers is the right tool now that the point is the world and
-> the behavior, not re-deriving backprop.
-
-The NumPy-from-scratch implementation (Dense layers, hand-written LSTM cell, hand-written Conv2D
-via im2col, a manual gradient checker) existed and worked during the earlier phase of this
-project; see `progress.md` for that history. It has since been removed from the codebase in favor
-of the PyTorch version — it is not being kept around as dead/legacy code to maintain.
-
----
-
-## 5. Working with an AI assistant
-
-Claude (or another AI assistant) acts as **implementer and technical reviewer** for this project:
-reading the codebase, proposing designs, prototyping/testing changes in a sandbox before touching
-the real project files, and writing to the project on request. The person reviews and confirms
-before changes land on disk.
-
-This is different from the project's original "AI as teacher only, human writes every line"
-workflow from the NumPy phase — that workflow made sense when the goal was to personally
-internalize every mechanism. Now that the goal is a working, observable simulation, delegating
-implementation work to an assistant (with review) is the more effective way to make progress.
-
-What's still expected of an assistant working on this project:
-
-- Keep world/agent/brain concerns cleanly separated (see architecture below) so behavior stays
-  inspectable and a change to one layer doesn't silently break another.
-- Verify non-trivial refactors behave identically to what they replaced (fixed seeds, before/after
-  comparison) before treating them as done.
-- Prefer code that's easy to reason about over cleverness, since "can I explain why the creature
-  is behaving this way" is still a project value even though "did I derive the math myself" is
-  not.
-
----
-
-## 6. Current architecture (high level — see `progress.md` for full detail)
+## Cách chia code đích (khái niệm)
 
 ```text
-World (2D grid: terrain layer [wall/water/soil/grass] + entities [food_low/food_high/food_starter/rotten_food/hazard])
-   ↓ local view (NumPy)
-Observation encoder (NumPy: multi-hot grid + body state)
-   ↓
-ConvLSTMDQN (PyTorch nn.Module: Conv2d+ReLU → LSTMCell → Linear)
-   ↓
-Epsilon-greedy policy → action
-   ↓
-World.step() → new state + event (ate food / hit hazard / blocked by wall / nothing)
-   ↓
-Agent body update (energy/health/age; crossing water costs extra time+energy)
-   ↓
-Episode replay buffer → windowed truncated-BPTT training (PyTorch autograd + Adam,
-                         with a periodically-synced target network)
+world/          luật môi trường, thời gian, terrain, thức ăn và sự kiện
+life/           cơ thể, nhu cầu, tuổi đời, sinh sản và danh tính cư dân
+behavior/       interface controller, luật nền và controller học được
+simulation/     sở hữu world + cư dân, tiến tick và quản lý save/load
+viewer/         vẽ thế giới, chọn/follow cư dân và gửi thao tác người dùng
+experiments/    công cụ tùy chọn để kiểm tra hoặc huấn luyện controller
 ```
 
-Entry points:
+Đây là hướng phân tách trách nhiệm, không phải yêu cầu đổi tên/thư mục ngay lập tức. Refactor nên diễn ra theo lát dọc có thể chạy được: mỗi giai đoạn giữ viewer hoạt động và cho thấy một cải thiện cụ thể.
 
-- `experiments/run_experiment.py` — multi-agent ecosystem training: runs the population simulation,
-  checkpoints the best individual to `results/best_model.pt`, renders `ecosystem_lifetime.gif`,
-  and logs `ecosystem_log.csv`, all in one command.
-- `experiments/pretrain_single_agent.py` — optional foundation-building step, run BEFORE
-  `run_experiment.py` (not instead of it): trains a single persistent brain across many lifetimes
-  using the original, richer single-agent learning signal (8 diverse windows sampled from a pool
-  of past completed lifetimes, vs. the ecosystem's 1 window from the individual's own in-progress
-  life). Reads/writes the same `results/best_model.pt`/`training_state.json`, so
-  `run_experiment.py`/`live_viewer.py` automatically continue from whatever it produces.
-- `tests/` — `pytest` regression tests for invariants that used to only be checked by hand in a
-  sandbox (spawn point never on wall/hazard, zone food coverage, epsilon decay, checkpoint
-  save/load round-trips and shape-mismatch fallback). Run with `pip install pytest && pytest tests/`.
-- `src/rl/live_viewer.py` — interactive Pygame 2D viewer for the live ecosystem; runs a much
-  bigger world (50×50) than training uses (10×10), at a slower default pace, meant to be
-  watched continuously rather than used for quick training debugging. Still loads from and
-  saves to the same `results/best_model.pt`/`training_state.json` as training — it's one more
-  source of training, not a sandboxed demo.
-- `src/rl/run_episode.py` — the training loop for a single lifetime, importable/reusable.
+## Tiêu chí thành công
 
-All entry points load from and save to the same single `results/best_model.pt` — there is
-deliberately only ever one "the model" file, so training-by-command and watching-interactively are
-always looking at/building on the same brain, never two silently diverging copies.
+- Tôi có thể mở viewer và thấy một thế giới đang hoạt động mà không cần chạy lệnh training trước.
+- Tôi có thể quan sát hoặc theo dõi một cá thể và hiểu các nhu cầu/sự kiện chính của nó.
+- Thế giới có thể được lưu, đóng, mở lại và tiếp tục.
+- Cư dân có hành vi đủ đa dạng và thế giới tạo ra diễn biến thú vị ngay cả khi dùng controller luật đơn giản.
+- Bất kỳ cơ chế học nào được giữ lại đều làm trải nghiệm quan sát tốt hơn; chỉ số training không phải mục tiêu sản phẩm.
 
-All tunable constants (world size, terrain, entity counts, reward shaping, network sizes, training
-hyperparameters) live in `src/config.py`.
+## Chạy code hiện tại
 
----
+Hai lệnh chính:
 
-## 7. What this project is NOT
+- `python train_brain.py --lifetimes 1000`: train/resume brain và lưu vào `results/best_model.pt`.
+- `python run_world.py`: mở world để quan sát. Dùng `python run_world.py --load` để mở save gần nhất.
 
-This project is not intended to:
+Các thư viện cần có gồm PyTorch, NumPy và Pygame.
 
-- claim to be AGI;
-- reproduce the human brain;
-- create a competitive LLM or general-purpose agent;
-- be a rigorous RL research benchmark;
-- immediately solve language understanding.
+Trong viewer, nhấn `S` để lưu thế giới vào `results/world_save.json` và `L` để mở lại save gần nhất. Save thế giới độc lập với `results/best_model.pt`; brain của từng resident (nếu có) nằm trong sidecar `world_save.json.brains.pt`.
 
-It also is **no longer** primarily:
+Viewer cũng hiển thị resident đang được theo dõi, tuổi/thế hệ, hướng và hành động gần nhất, cùng lịch sử các sự kiện riêng của resident bên cạnh nhật ký chung của thế giới.
 
-- a from-scratch deep-learning tutorial project (that was its original purpose; see `progress.md`
-  for that history — the code from that phase has been retired).
+Các entry point ecosystem/pretrain cũ vẫn có thể dùng để khảo sát hệ thống hiện tại, nhưng roadmap hướng tới việc khiến chúng trở thành công cụ phụ trợ thay vì cách người dùng chính khởi động sản phẩm.
 
-It is an experimental, watchable simulation of a simple learning creature. If it also ends up fun
-to watch or play with as a small game, that's the point, not a bonus.
+## Lịch sử kỹ thuật
 
----
-
-## 8. Definition of success
-
-The project is successful if someone (including the person building it) can watch a creature's
-lifetime — live in the viewer or as a recorded GIF — and say something like:
-
-> "Early in training it wandered and bumped into hazards; by the end it clearly beelines for food
-> and swerves around hazards it can see. I can point at *when* and *how* that changed."
-
-That is the core experiment now: not "I understand every gradient," but "I can observe and explain
-how this creature's behavior developed."
-
-```text
-small persistent world
-    ↓
-creature with a trainable brain
-    ↓
-lifetime of experience
-    ↓
-observable behavior change
-    ↓
-repeat across lifetimes / world variations
-    ↓
-a simulation that's actually worth watching
-```
+Dự án từng bắt đầu như một bài tập tự cài đặt mạng neural bằng NumPy. Phần đó đã được thay bằng PyTorch. Lịch sử thay đổi chi tiết và các thí nghiệm trước đây nằm trong [`progress.md`](progress.md); hãy xem đó là nhật ký lịch sử kỹ thuật, còn README này mô tả mục tiêu hiện tại.

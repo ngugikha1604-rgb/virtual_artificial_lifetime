@@ -174,6 +174,74 @@ class TorchQAgent:
                 q_parts.append(q_last)
                 t_parts.append(rewards[L - 1])
 
+        return self._apply_learn_update(q_parts, t_parts)
+
+    def _zero_state(self):
+        """Initial zero hidden & cell state tensors (1, HIDDEN_SIZE) on device."""
+        return (
+            torch.zeros(1, config.HIDDEN_SIZE, dtype=torch.float32, device=self.device),
+            torch.zeros(1, config.HIDDEN_SIZE, dtype=torch.float32, device=self.device),
+        )
+
+    def _burn_in(self, net, burn_in_slice):
+        """Unroll `net` without gradients through burn_in_slice starting from zero_state
+        to produce a fresh (h, c)."""
+        h, c = self._zero_state()
+        if not burn_in_slice:
+            return h, c
+        with torch.no_grad():
+            for item in burn_in_slice:
+                xk = self._t(item[0])
+                lstm_in = net.forward_obs(xk)
+                _, h, c = net.forward_q(lstm_in, h, c)
+        return h, c
+
+    def learn_windows_burned_in(self, pairs):
+        """
+        pairs: list of (burn_in_slice, learn_slice) tuples.
+        Burn-in is run separately without gradients through self.net and
+        self.target_net from zero_state() to obtain fresh recurrent context
+        (h0, c0) and (h0_tgt, c0_tgt) before learning on learn_slice.
+        """
+        q_parts, t_parts = [], []
+
+        for burn_in_slice, learn_slice in pairs:
+            L = len(learn_slice)
+            if L < 2:
+                continue
+
+            # 1. Burn-in: produce fresh (h0, c0) for online net and target net separately
+            h0, c0 = self._burn_in(self.net, burn_in_slice)
+            h0_tgt, c0_tgt = self._burn_in(self.target_net, burn_in_slice)
+
+            xs      = [self._t(w[0]) for w in learn_slice]
+            actions = [w[3] for w in learn_slice]
+            rewards = [float(w[4]) for w in learn_slice]
+            dones   = [bool(w[5]) for w in learn_slice]
+
+            # online unroll (grad ON) — values being fit + terminal estimate
+            qs = self._unroll_q(self.net, xs, h0, c0)
+
+            # target unroll (grad OFF, frozen weights) — bootstrap values only
+            with torch.no_grad():
+                qs_target = self._unroll_q(self.target_net, xs, h0_tgt, c0_tgt)
+
+            for k in range(L - 1):
+                q_k  = qs[k][0, actions[k]]
+                q_nx = qs_target[k + 1]
+                boot = rewards[k] + self.gamma * float(q_nx.max())
+                q_parts.append(q_k)
+                t_parts.append(boot)
+
+            # supervise the actual terminal tick if the window reached it
+            if dones[L - 1]:
+                q_last = qs[L - 1][0, actions[L - 1]]
+                q_parts.append(q_last)
+                t_parts.append(rewards[L - 1])
+
+        return self._apply_learn_update(q_parts, t_parts)
+
+    def _apply_learn_update(self, q_parts, t_parts):
         if not q_parts:
             return 0.0
 

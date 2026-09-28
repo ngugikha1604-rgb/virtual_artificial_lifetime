@@ -34,7 +34,7 @@ from pathlib import Path
 SRC_DIR = Path(__file__).resolve().parent.parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-from config import REPLAY_CAPACITY
+from config import REPLAY_CAPACITY, BURN_IN_N
 
 
 class LSTMReplayBuffer:
@@ -114,6 +114,43 @@ class LSTMReplayBuffer:
         if len(self._current) < 2:
             return []
         return self._current[-window_n:]
+
+    def sample_current_windows(self, k, window_n, burn_in_n=BURN_IN_N):
+        """Sample up to `k` windows from the CURRENTLY IN-PROGRESS episode
+        (self._current), together with their preceding burn-in context slices.
+
+        Returns a list of pairs: [(burn_in_slice, learn_slice), ...]
+        - If len(self._current) < 2: returns [] (no learnable transition).
+        - If len(self._current) < window_n + 1: fallback to a single window
+          containing the entire in-progress episode with empty burn-in (starts
+          at zero_state).
+        - If len(self._current) >= window_n + 1: samples `k` start indices `s`
+          in [0, len(self._current) - window_n] (without replacement if enough
+          distinct start points exist, with replacement otherwise).
+          For each `s`:
+            burn_in_slice = self._current[max(0, s - burn_in_n) : s]
+            learn_slice   = self._current[s : s + window_n]
+        """
+        L = len(self._current)
+        if L < 2:
+            return []
+        if L < window_n + 1:
+            return [([], self._current[:])]
+
+        num_starts = L - window_n + 1
+        starts_range = range(num_starts)
+        if num_starts >= k:
+            starts = random.sample(starts_range, k)
+        else:
+            starts = random.choices(starts_range, k=k)
+
+        pairs = []
+        for s in starts:
+            burn_start = max(0, s - burn_in_n)
+            burn_in_slice = self._current[burn_start:s]
+            learn_slice = self._current[s:s + window_n]
+            pairs.append((burn_in_slice, learn_slice))
+        return pairs
 
     def start_episode(self):
         """Signal the buffer that a new lifetime has begun; discards any

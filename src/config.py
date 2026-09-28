@@ -1,80 +1,17 @@
-"""
-config.py — single source of truth for all global constants.
+# Shared tuning values for the world, residents, viewer, and optional brain.
 
-Every entry point (experiments/phase5_online_qlearning/run_experiment.py,
-src/rl/live_viewer.py, src/rl/run_episode.py, ...) reads its world + RL
-settings from here instead of re-declaring them, so the world an agent is
-trained on always matches the world it is then visualized in.
-
-Rationale / earlier duplication:
-  - run_experiment.py declared world_size=10, food 2/2, hazard 3, max_age 400
-  - visualize_lifetime.py declared TRAIN_LIFETIMES=1000 subset
-  - live_viewer.py hard-coded the SAME world_size=10 / 2 / 2 / 3 / 400 and RL
-    hyperparameters in its __init__ signature defaults
-If these ever drifted, a trained brain would be framed against a different
-world than it was trained on. Now they all point here.
-
-The project philosophy is <<understand > abstraction>>, so this file stays a
-plain, readable set of module-level constants (no nested config loader, no env
-files, no magic). Searching for a value means reading this one file.
-
-Agent body constants live here too (energy/health/damage...) so reward / damage
-tuning experiments (see progress.md: "tinh chỉnh reward/damage constants") are a
-one-file edit — src/world/agent.py no longer hard-codes them.
-"""
-
-# ── World layout (shared by training + live viewer + demo recording) ────────
+# ── World layout ─────────────────────────────────────────────────────────────
 WORLD_SIZE      = 10      # square grid (world default in __init__ used elsewhere)
 NUM_FOOD_LOW    = 5
 NUM_FOOD_HIGH   = 4
 NUM_HAZARDS     = 3
-# A single food that (a) never respawns once eaten and (b) always spawns
-# exactly one cell in front of the agent's spawn point (World.spawn_point()) —
-# see World's docstring / _init_entities. Purpose: guarantee a newborn agent
-# can succeed at eating something immediately, rather than depending on
-# wandering into the zone-distributed food below before it happens to notice
-# food exists at all. NUM_FOOD_LOW + NUM_FOOD_HIGH must be >= the number of
-# 3x3 zones ((WORLD_SIZE // World.ZONE_SIZE) ** 2 == 9 at these defaults) for
-# World._init_entities()'s "at least one food per zone" guarantee to hold —
-# 5+4=9 exactly covers it. If you change WORLD_SIZE or World.ZONE_SIZE,
-# recompute this and bump the counts to match.
+# Starter food guarantees an immediately reachable first meal.
 NUM_FOOD_STARTER = 1
 MAX_AGE         = 400     # ticks a lifetime may last at most
 
-# ── Terrain (background layer, separate from food/hazard entities) ──────────
-# Terrain is a persistent per-cell background (generated once at World.__init__,
-# never changes during a lifetime) that entities sit ON TOP of — unlike food/
-# hazard, terrain is never eaten/consumed/respawned. Kept as its own grid
-# (World.terrain) rather than being modeled as entities because its lifecycle
-# is completely different (static vs. ephemeral) — see progress.md.
-#
-# Codes share ONE alphabet with entities in the local-view grid. World has TWO
-# ways to read a cell: get_local_view() collapses to one representative code
-# per cell (entity wins over terrain — used for human-facing display only),
-# while get_local_view_layers() keeps terrain and entity as independent bits
-# that the network's multi-hot observation encoding can both set at once (see
-# NUM_CELL_CLASSES above and World's docstring for the authoritative table).
-#
-# grass/soil: both freely walkable, currently mechanically identical (a hook
-#   for later, e.g. biasing food spawns toward one) — SOIL_FRACTION is the
-#   fraction of the default ground fill that becomes soil vs grass.
-# wall (interior, not just the world boundary): blocks movement outright —
-#   World.step() reverts the move (agent "bumps" and stays put, still paying
-#   the tick's energy cost) if the destination cell is a wall.
-# water: walkable, but costs WATER_DURATION_MULTIPLIER x as many busy-ticks
-#   for a forward/backward move that lands on it (Agent.commit_action) —
-#   since every tick, free or busy, still costs ENERGY_COST regardless of
-#   action, a longer duration is also a proportionally larger energy cost,
-#   so one multiplier models both "wading takes longer" and "wading tires
-#   you out more" without needing two separate mechanisms.
-#
-# Generation carves a few small WATER patches + WALL line segments out of a
-# random grass/soil base fill, keeping counts/sizes modest relative to a
-# 10x10 world so they add texture without much risk of sealing off an area
-# (see progress.md for the accepted simplification: no full reachability/
-# connectivity check is done — revisit if the agent starts getting stuck).
-# The world-center spawn cell (see Agent.__init__) is always kept clear of
-# wall/water so the agent never spawns already blocked in.
+# ── Terrain ───────────────────────────────────────────────────────────────────
+# Terrain is persistent background; food and hazards are separate entities.
+# Soil/grass are walkable, water slows movement, and walls block movement.
 NUM_WATER_PATCHES = 2      # count of water patches carved per world
 WATER_PATCH_SIZE  = 2      # each patch is WATER_PATCH_SIZE x WATER_PATCH_SIZE
 NUM_WALL_SEGMENTS = 2      # count of wall line-segments carved per world
@@ -82,73 +19,22 @@ WALL_SEGMENT_LEN  = 3      # length of each wall segment (straight, random orien
 SOIL_FRACTION     = 0.30   # fraction of the default ground fill that's soil (rest grass)
 WATER_DURATION_MULTIPLIER = 2   # x ACTION_DURATION for a move landing on water
 
-# ── Food growth (replaces instant "teleport respawn" with an organic sim) ─────
-# food_low/food_high used to instantly reappear elsewhere the moment one was
-# eaten (World._respawn_entity, zone-balanced). Now they're removed for good
-# on eat ("respawns": False, same as food_starter) and NEW food only appears
-# through this per-tick growth simulation — chosen because instant magic
-# relocation never fit "world hợp lý hơn" (a more believable/organic world),
-# and because it's what finally makes soil vs grass mechanically different,
-# not just differently colored (see SOIL_FRACTION above, previously just a
-# hook for this).
+# ── Food growth ───────────────────────────────────────────────────────────────
+# Eaten food is removed; new food grows through seed -> maturation.
 #
-# TWO-STAGE growth, not "roll dice -> food appears" in one step:
-#   1. SEEDING (stochastic): each tick, every eligible empty cell (grass or
-#      soil, no entity, not already seeded) has a small chance of becoming a
-#      seed (World.seeds: {(x,y): ticks_remaining}). Chance =
-#          FOOD_SEED_BASE_RATE[terrain]
-#        + FOOD_SEED_SPREAD_BONUS[terrain]  (only if an orthogonally-adjacent
-#                                             cell currently has a MATURE food
-#                                             item — "reproduction"/spreading
-#                                             from existing food, not other
-#                                             seeds)
-#      Soil seeds spontaneously FASTER (base rate) but spreads slower;
-#      grass is the opposite — spreads fast near existing food but rarely
-#      starts one on its own. (Khanh's choice — "soil mọc nền nhanh hơn, grass
-#      lan truyền nhanh hơn".)
-#   2. MATURATION (deterministic): once seeded, a fixed countdown (randomized
-#      per seed between MIN/MAX below) ticks down; at 0 the seed becomes an
-#      actual food entity. This is what makes growth genuinely feel like
-#      "planted, then takes time to grow" instead of an instant probability
-#      roll — a seed's arrival is stochastic, but once it exists, its
-#      maturity time is not, so growth is visibly staged over time rather
-#      than popping food into existence at random.
-# Seeds are NOT visible to the agent (no observation channel — kept out of
-# NUM_CELL_CLASSES on purpose, so this doesn't re-invalidate the network); a
-# human watching the GIF/live_viewer CAN see them (small distinct marker) —
-# this can change later if "agent waits near a maturing seed" behavior is
-# wanted, at the cost of another observation channel.
-#
-# Food TYPE on maturation is a fixed global split, independent of terrain or
-# the neighbor that triggered the spread (Khanh's choice — simplest option).
+# Seeds mature into food after a randomized 15-30 tick countdown.
 FOOD_SEED_BASE_RATE   = {"soil": 0.003, "grass": 0.001}
 FOOD_SEED_SPREAD_BONUS = {"soil": 0.005, "grass": 0.012}
 FOOD_SEED_MATURATION_MIN = 15   # ticks a seed takes to become food (fastest)
 FOOD_SEED_MATURATION_MAX = 30   # ticks a seed takes to become food (slowest)
 FOOD_GROWTH_TYPE_SPLIT = {"food_low": 0.7, "food_high": 0.3}
-# Cap on (mature food + pending seeds) combined — growth simply stops
-# attempting NEW seeds once reached (existing seeds already "in progress"
-# still mature normally, so actual food count can briefly exceed this right
-# after several mature at once). Prevents the spreading/reproduction bonus
-# from compounding unbounded and carpeting the whole 10x10 world; think of it
-# as the world's food carrying capacity. (2026-09: lowered 20->14 + halved the
-# rates above — Khanh found the world felt too food-dense; still comfortably
-# above the initial NUM_FOOD_LOW+NUM_FOOD_HIGH+NUM_FOOD_STARTER=10 so there's
-# some room to regrow, just less of it.)
+# Maximum mature food + pending seeds. Growth pauses at this capacity.
 MAX_FOOD_ON_WORLD = 14
 
 # ── Food aging / expiration ────────────────────────────────────────────────────
-# Once a seed matures into food_low, it ages through a fixed lifecycle:
-#   food_low  -> food_high  (after FOOD_AGE_STAGE_TICKS ticks)
-#   food_high -> food_low   (after FOOD_AGE_STAGE_TICKS ticks)
-#   food_low  -> rotten     (after FOOD_AGE_STAGE_TICKS ticks)
-#   rotten    -> gone       (after FOOD_AGE_STAGE_TICKS ticks, removed from world)
-# food_starter is EXEMPT — it exists until eaten (its whole purpose is a
-# guaranteed early win; making it rot would undermine that).
-# rotten_food is a distinct entity type with its own observation channel (8)
-# so the network can learn "that triangle is food I should avoid".
-# Eating rotten_food applies a negative energy effect (see FOOD_EFFECTS above).
-FOOD_AGE_STAGE_TICKS = 5    # ticks each stage lasts before advancing
+# food_low -> food_high -> food_low -> rotten -> gone.
+# Starter food is permanent; rotten food remains visible and harmful to eat.
+FOOD_AGE_STAGE_TICKS = 25   # 4 stages; roughly 100 ticks fresh-to-gone
 
 # Local-view geometry — the source of truth; World.__init__ defaults mirror it.
 # The agent sees VISION_RANGE squares straight ahead, VISION_WIDTH columns wide,
@@ -230,10 +116,12 @@ REPLAY_CAPACITY = 200     # max number of stored EPISODES
 #                  autograd graph (truncated BPTT; gradient flows back <= N steps).
 #  - MIN_EPISODES: don't learn until this many completed episodes (any length)
 #                  are buffered.
-BATCH_SIZE      = 8
-WINDOW_N        = 16
-MIN_EPISODES    = 10
-LEARN_EVERY     = 4             # learn every N ticks of the live episode
+BATCH_SIZE               = 8
+BATCH_SIZE_ECOSYSTEM     = 4       # windows sampled per learn step for an ecosystem individual
+BURN_IN_N                = 16      # hard cap on max ticks burned-in before a window
+WINDOW_N                 = 16
+MIN_EPISODES             = 10
+LEARN_EVERY              = 4             # learn every N ticks of the live episode
 
 # Target network (classic DQN fix, ported to the windowed/recurrent setting):
 # learn_windows() bootstraps step k's target from a SEPARATE, periodically-
